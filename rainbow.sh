@@ -127,22 +127,24 @@ show_installation_status() {
 }
 
 show_tls_status() {
-  local domain="-"
+  local domain="-" self_signed_status acme_status
   if valid_self_signed_certificate; then
-    printf '  %-8s 自签证书（有效）\n' 'TLS'
+    self_signed_status="有效"
   elif [[ -e "$SELF_SIGNED_TLS_CERT" || -e "$SELF_SIGNED_TLS_KEY" ]]; then
-    printf '  %-8s 自签证书（状态异常）\n' 'TLS'
+    self_signed_status="状态异常"
   else
-    printf '  %-8s 自签证书（未配置）\n' 'TLS'
+    self_signed_status="未配置"
   fi
   [[ -s "$TLS_DOMAIN_FILE" ]] && IFS= read -r domain < "$TLS_DOMAIN_FILE"
   if valid_acme_certificate; then
-    printf '  %-8s %s（有效）\n' 'ACME' "$domain"
+    acme_status="${domain}，有效"
   elif [[ -e "$ACME_TLS_CERT" || -e "$ACME_TLS_KEY" ]]; then
-    printf '  %-8s %s（状态异常）\n' 'ACME' "$domain"
+    acme_status="${domain}，状态异常"
   else
-    printf '  %-8s 未配置\n' 'ACME'
+    acme_status="未配置"
   fi
+  printf '  %-8s 自签证书（%s），ACME（%s）\n' \
+    'TLS' "$self_signed_status" "$acme_status"
 }
 
 select_action() {
@@ -153,7 +155,7 @@ select_action() {
     '3) 查看所有节点' \
     '4) 更新 rainbow' \
     '5) 一键卸载' \
-    '6) TLS 证书管理' \
+    '6) 证书管理' \
     '7) 一键初始化' \
     ''
 
@@ -1268,6 +1270,85 @@ configure_acme_certificate() {
   log "ACME 证书已安装：$ACME_TLS_CERT"
 }
 
+remove_acme_certificate() {
+  local answer config_file="$TMP_DIR/remove-acme.json" type
+  local config_backup="$TMP_DIR/remove-acme.backup" timer_was_enabled=0
+  local -a removed_types=()
+
+  if [[ ! -e "$ACME_TLS_CERT" && ! -e "$ACME_TLS_KEY" \
+    && ! -e "$TLS_DOMAIN_FILE" && ! -e "$ACME_CF_TOKEN_FILE" ]]; then
+    printf '当前没有 ACME 证书。\n'
+    return
+  fi
+  read -r -p '请输入 REMOVE 确认移除当前 ACME 证书：' answer
+  [[ "$answer" == "REMOVE" ]] || {
+    printf '已取消移除。\n'
+    return 1
+  }
+  systemctl is-enabled "$ACME_TIMER" >/dev/null 2>&1 && timer_was_enabled=1
+  if systemctl cat "$ACME_TIMER" >/dev/null 2>&1; then
+    systemctl disable --now "$ACME_TIMER" || return 1
+  fi
+  systemctl stop "$ACME_SERVICE" >/dev/null 2>&1 || true
+
+  if [[ -x "$SING_BOX_HOME/sing-box" && -f "$SING_BOX_HOME/config.json" ]]; then
+    for type in tuic anytls hysteria2; do
+      if jq -e --arg tag "rainbow-${type}" --arg acme_cert "$ACME_TLS_CERT" \
+        --arg acme_key "$ACME_TLS_KEY" '
+          any(.inbounds[]?;
+            (.tag == $tag)
+            and ((.tls.certificate_path? == $acme_cert)
+              or (.tls.key_path? == $acme_key)))
+        ' "$SING_BOX_HOME/config.json" >/dev/null; then
+        removed_types+=("$type")
+      fi
+    done
+    if ! jq --arg acme_cert "$ACME_TLS_CERT" --arg acme_key "$ACME_TLS_KEY" \
+      '
+        def uses_acme:
+          (.tls.certificate_path? == $acme_cert) or (.tls.key_path? == $acme_key);
+        ([.inbounds[]? | select(uses_acme)]) as $removed
+        | ([$removed[].users[]?.name]) as $removed_users
+        | .inbounds = [(.inbounds // [])[] | select(uses_acme | not)]
+        | .route = ((.route // {}) | .rules = [
+            (.rules // [])[] | select(
+              [(.auth_user // [])[]
+                | select(. as $user | $removed_users | index($user))] | length == 0
+            )
+          ])
+        | ([.route.rules[]? | select((.outbound // "") == "rainbow-warp")]
+            | length > 0) as $needs_warp
+        | if $needs_warp then .
+          else .endpoints = ((.endpoints // [])
+            | map(select((.tag // "") != "rainbow-warp")))
+          end
+      ' "$SING_BOX_HOME/config.json" > "$config_file" \
+      || ! "$SING_BOX_HOME/sing-box" check -c "$config_file" \
+      || ! install -m 0600 "$SING_BOX_HOME/config.json" "$config_backup" \
+      || ! install -m 0600 "$config_file" "$SING_BOX_HOME/config.json"; then
+      [[ "$timer_was_enabled" == "0" ]] || systemctl enable --now "$ACME_TIMER" || true
+      return 1
+    fi
+    if [[ -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" ]] \
+      && ! systemctl restart "$SING_BOX_SERVICE"; then
+      install -m 0600 "$config_backup" "$SING_BOX_HOME/config.json"
+      systemctl restart "$SING_BOX_SERVICE" || true
+      [[ "$timer_was_enabled" == "0" ]] || systemctl enable --now "$ACME_TIMER" || true
+      return 1
+    fi
+  fi
+
+  rm -f "$ACME_TLS_CERT" "$ACME_TLS_KEY" "$TLS_DOMAIN_FILE" "$ACME_CF_TOKEN_FILE"
+  rm -rf "$ACME_DATA_HOME"
+  if ((${#removed_types[@]})); then
+    for type in "${removed_types[@]}"; do
+      rm -f "$SING_BOX_HOME/client-${type}.txt"
+    done
+    refresh_sing_box_client_info
+  fi
+  log 'ACME 证书及依赖此证书的节点已移除'
+}
+
 renew_acme_certificate() {
   local domain before_digest="" after_digest command_name
   for command_name in openssl sha256sum; do
@@ -1290,52 +1371,22 @@ renew_acme_certificate() {
   log 'ACME 证书已续期并部署'
 }
 
-show_acme_certificate_status() {
-  local domain="-" end_date end_epoch now_epoch remaining_days
-
-  [[ -s "$TLS_DOMAIN_FILE" ]] && IFS= read -r domain < "$TLS_DOMAIN_FILE"
-  printf '根域名：%s\n证书路径：%s\n' "$domain" "$ACME_TLS_CERT"
-  if [[ -s "$ACME_TLS_CERT" ]]; then
-    if command -v openssl >/dev/null 2>&1 \
-      && openssl x509 -in "$ACME_TLS_CERT" -noout -issuer -dates -ext subjectAltName; then
-      end_date=$(openssl x509 -in "$ACME_TLS_CERT" -noout -enddate | cut -d= -f2-)
-      end_epoch=$(date -d "$end_date" +%s 2>/dev/null || true)
-      now_epoch=$(date +%s)
-      if [[ "$end_epoch" =~ ^[0-9]+$ ]]; then
-        remaining_days=$(((end_epoch - now_epoch) / 86400))
-        printf '剩余天数：%s\n' "$remaining_days"
-      fi
-    else
-      printf '证书文件无效或缺少 openssl。\n' >&2
-    fi
-  else
-    printf '证书文件不存在。\n' >&2
-  fi
-  if systemctl is-enabled "$ACME_TIMER" >/dev/null 2>&1; then
-    printf '自动续期：已启用\n'
-  else
-    printf '自动续期：未启用\n'
-  fi
-}
-
 manage_tls_certificates() {
   local choice
   while true; do
     clear_screen
-    show_header 'TLS 证书管理'
+    show_header '证书管理'
     printf '%s\n' \
       '1) 申请/重新配置 ACME 证书' \
-      '2) 查看 ACME 证书状态' \
-      '3) 立即检查 ACME 续期' \
+      '2) 移除当前 ACME 证书' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2/3]：' choice
+    read -r -p '请输入 [0/1/2]：' choice
     case "$choice" in
       1) configure_acme_certificate || true; pause_menu ;;
-      2) show_acme_certificate_status || true; pause_menu ;;
-      3) renew_acme_certificate || printf 'ACME 证书续期检查失败。\n' >&2; pause_menu ;;
+      2) remove_acme_certificate || true; pause_menu ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
     esac
   done
 }
@@ -1578,7 +1629,6 @@ write_sing_box_client_block() {
 }
 
 save_sing_box_client_info() {
-  local all_clients="$SING_BOX_HOME/client.txt"
   local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label
 
   case "$SING_NODE_TYPE" in
@@ -1605,18 +1655,24 @@ save_sing_box_client_info() {
       ;;
   esac
 
+  refresh_sing_box_client_info
+
+  printf '\n节点搭建完成：\n'
+  cat "$client_file"
+  printf '全部客户端信息已保存至：%s\n' "$SING_BOX_HOME/client.txt"
+  printf '请在服务器防火墙中开放端口：%s/%s\n\n' \
+    "$NODE_PORT" "$([[ "$SING_NODE_TYPE" == "anytls" ]] && printf tcp || printf udp)"
+}
+
+refresh_sing_box_client_info() {
+  local all_clients="$SING_BOX_HOME/client.txt" type
+
   install -m 0600 /dev/null "$all_clients"
   for type in tuic anytls hysteria2; do
     [[ -f "$SING_BOX_HOME/client-${type}.txt" ]] || continue
     [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
     cat "$SING_BOX_HOME/client-${type}.txt" >> "$all_clients"
   done
-
-  printf '\n节点搭建完成：\n'
-  cat "$client_file"
-  printf '全部客户端信息已保存至：%s\n' "$all_clients"
-  printf '请在服务器防火墙中开放端口：%s/%s\n\n' \
-    "$NODE_PORT" "$([[ "$SING_NODE_TYPE" == "anytls" ]] && printf tcp || printf udp)"
 }
 
 setup_sing_box_node() {
