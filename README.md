@@ -12,6 +12,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.s
 rb
 ```
 
+首次执行会自动安装最新版 Xray、sing-box，并生成自签 TLS 证书。主菜单中的 `一键初始化` 会先卸载 Rainbow 管理的全部数据，再重新执行上述初始化。
+
 需要更新脚本时，在菜单中选择 `更新 rainbow`。
 
 通过 rainbow 安装的程序和配置位于：
@@ -23,9 +25,11 @@ rb
 
 对应的 systemd 服务为 `rainbow-sing-box` 和 `rainbow-xray`，不会覆盖其他方式安装的同名程序和服务。
 
-## ACME TLS 证书
+## TLS 证书
 
-在主菜单选择 `TLS 证书管理`，输入根域名和 Cloudflare API Token。脚本会申请一张同时包含以下域名的 Let's Encrypt 证书：
+主菜单会显示当前 TLS 证书模式和有效状态。进入 `TLS 证书管理` 可以在自签证书与已申请的 ACME 证书之间切换。
+
+申请 ACME 证书时，输入根域名和 Cloudflare API Token。脚本会申请一张同时包含以下域名的 Let's Encrypt 证书：
 
 ```text
 example.com
