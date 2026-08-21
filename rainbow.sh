@@ -427,6 +427,33 @@ read_node_port() {
   done
 }
 
+valid_cf_https_port() {
+  [[ "$1" =~ ^(443|2053|2083|2087|2096|8443)$ ]]
+}
+
+read_cf_https_port() {
+  local input port
+
+  while true; do
+    read -r -p '请输入 Cloudflare HTTPS 端口 [443]：' input
+    input=${input:-443}
+    if ! valid_cf_https_port "$input"; then
+      printf '仅支持 Cloudflare HTTPS 端口：443、2053、2083、2087、2096、8443。\n' >&2
+      continue
+    fi
+    port=$((10#$input))
+    if port_in_use "$port" \
+      && ! jq -e --argjson port "$port" '
+        any(.inbounds[]?; .tag == "rainbow-vless-ws" and .port == $port)
+      ' "$XRAY_HOME/config.json" >/dev/null; then
+      printf '端口 %s 已被占用。\n' "$port" >&2
+      continue
+    fi
+    NODE_PORT=$port
+    return
+  done
+}
+
 detect_public_ipv4() {
   local address
   address=$(curl --retry 2 --connect-timeout 5 -4 -fsSL https://api.ipify.org 2>/dev/null) || return 1
@@ -453,6 +480,11 @@ read_node_address() {
 read_node_details() {
   local input
 
+  if [[ "$NODE_TYPE" == "ws" ]]; then
+    read_ws_node_details
+    return
+  fi
+
   read_node_port || return
   read_node_address
 
@@ -474,6 +506,61 @@ read_node_details() {
     }
     printf 'XHTTP 路径：%s\n' "$NODE_PATH"
   fi
+}
+
+valid_domain_prefix() {
+  [[ ${#1} -ge 1 && ${#1} -le 63 \
+    && "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+read_ws_node_details() {
+  local input root_domain
+
+  valid_acme_certificate || {
+    printf 'VLESS + WebSocket 节点必须先配置有效的 ACME 证书。\n' >&2
+    return 1
+  }
+  IFS= read -r root_domain < "$TLS_DOMAIN_FILE"
+  read_cf_https_port || return
+
+  while true; do
+    printf '当前证书根域名：%s\n' "$root_domain"
+    read -r -p '请输入 CDN 域名前缀 [cdn]：' input
+    input=$(normalize_domain "${input:-cdn}")
+    if valid_domain_prefix "$input"; then
+      NODE_DOMAIN_PREFIX=$input
+      break
+    fi
+    printf '域名前缀只能包含小写字母、数字和连字符，且不能以连字符开头或结尾。\n' >&2
+  done
+
+  NODE_SERVER_NAME="${NODE_DOMAIN_PREFIX}.${root_domain}"
+  NODE_ADDRESS=$NODE_SERVER_NAME
+  openssl x509 -in "$ACME_TLS_CERT" -noout -checkhost "$NODE_SERVER_NAME" \
+    >/dev/null || {
+      printf '当前 ACME 证书不包含域名：%s\n' "$NODE_SERVER_NAME" >&2
+      return 1
+    }
+  printf '完整节点域名：%s\n' "$NODE_SERVER_NAME"
+
+  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
+  NODE_PATH=${input:-/$(random_hex 4)}
+  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
+  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
+    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
+    return 1
+  }
+  printf '%s\n' \
+    "WebSocket 路径：$NODE_PATH" \
+    '' \
+    '请在 Cloudflare 添加并开启小黄云：' \
+    "  类型：A" \
+    "  名称：$NODE_DOMAIN_PREFIX" \
+    '  内容：服务器公网 IP' \
+    '  代理状态：已代理（开启小黄云）' \
+    "  完整域名：$NODE_SERVER_NAME" \
+    "  端口：$NODE_PORT" \
+    '  SSL/TLS 模式：Full (strict)'
 }
 
 select_warp_mode() {
@@ -649,6 +736,14 @@ generate_xray_credentials() {
   if [[ "$WARP_MODE" == "both" ]]; then
     NODE_WARP_UUID=$("$XRAY_HOME/xray" uuid)
   fi
+  if [[ "$NODE_TYPE" == "ws" ]]; then
+    NODE_PRIVATE_KEY=""
+    NODE_PUBLIC_KEY=""
+    NODE_SHORT_ID=""
+    [[ "$NODE_UUID" =~ ^[0-9a-fA-F-]{36}$ \
+      && ( -z "$NODE_WARP_UUID" || "$NODE_WARP_UUID" =~ ^[0-9a-fA-F-]{36}$ ) ]]
+    return
+  fi
   key_output=$("$XRAY_HOME/xray" x25519)
   NODE_PRIVATE_KEY=$(awk -F ': *' 'tolower($1) ~ /^private[[:space:]]*key$/ {print $2; exit}' \
     <<<"$key_output")
@@ -662,15 +757,13 @@ generate_xray_credentials() {
 }
 
 write_xray_node_config() {
-  local current_config=$1 config_file=$2 flow network tag warp_email
+  local current_config=$1 config_file=$2 flow network security tag warp_email
 
-  if [[ "$NODE_TYPE" == "xhttp" ]]; then
-    network="xhttp"
-    flow=""
-  else
-    network="tcp"
-    flow="xtls-rprx-vision"
-  fi
+  case "$NODE_TYPE" in
+    xhttp) network="xhttp"; security="reality"; flow="" ;;
+    tcp) network="tcp"; security="reality"; flow="xtls-rprx-vision" ;;
+    ws) network="ws"; security="tls"; flow="" ;;
+  esac
   tag="rainbow-vless-${NODE_TYPE}"
   warp_email="rainbow-${NODE_TYPE}-warp"
 
@@ -681,6 +774,7 @@ write_xray_node_config() {
     --arg warp_mode "$WARP_MODE" \
     --arg flow "$flow" \
     --arg network "$network" \
+    --arg security "$security" \
     --arg tag "$tag" \
     --arg warp_email "$warp_email" \
     --arg path "$NODE_PATH" \
@@ -688,6 +782,8 @@ write_xray_node_config() {
     --arg server_name "$NODE_SERVER_NAME" \
     --arg private_key "$NODE_PRIVATE_KEY" \
     --arg short_id "$NODE_SHORT_ID" \
+    --arg certificate_file "$ACME_TLS_CERT" \
+    --arg key_file "$ACME_TLS_KEY" \
     --arg warp_private_key "${WARP_PRIVATE_KEY:-}" \
     --arg warp_addresses "${WARP_ADDRESSES:-}" \
     --arg warp_public_key "${WARP_PUBLIC_KEY:-}" \
@@ -703,6 +799,7 @@ write_xray_node_config() {
         (
           (.tag // "") == "" and
           .protocol == "vless" and
+          $network != "ws" and
           .streamSettings.security == "reality" and
           (if $network == "tcp" then
             (.streamSettings.network // "tcp") == "tcp" or
@@ -739,7 +836,16 @@ write_xray_node_config() {
           },
           streamSettings: ({
             network: $network,
-            security: "reality",
+            security: $security
+          } + if $network == "ws" then {
+            tlsSettings: {
+              certificates: [{
+                certificateFile: $certificate_file,
+                keyFile: $key_file
+              }]
+            },
+            wsSettings: {path: $path, host: $server_name}
+          } else {
             realitySettings: {
               show: false,
               target: $target,
@@ -748,9 +854,8 @@ write_xray_node_config() {
               privateKey: $private_key,
               shortIds: [$short_id]
             }
-          } + if $network == "xhttp" then {
-            xhttpSettings: {path: $path}
-          } else {} end),
+          } end
+          + if $network == "xhttp" then {xhttpSettings: {path: $path}} else {} end),
           sniffing: {
             enabled: true,
             destOverride: ["http", "tls", "quic"]
@@ -801,24 +906,39 @@ write_xray_node_config() {
 write_xray_client_block() {
   local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_path uri
 
-  if [[ "$NODE_TYPE" == "xhttp" ]]; then
-    encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-    uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${label}"
-  else
-    uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
-  fi
+  case "$NODE_TYPE" in
+    xhttp)
+      encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${label}"
+      ;;
+    tcp)
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
+      ;;
+    ws)
+      encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${label}"
+      ;;
+  esac
 
   printf '%s\n' \
     "类型：$label" \
     "出站：$outbound" \
     "地址：$NODE_ADDRESS" \
-    "端口：$NODE_PORT" \
-    "伪装域名：$NODE_SERVER_NAME" \
-    "XHTTP 路径：${NODE_PATH:--}" \
-    "UUID：$uuid" \
-    "Public Key：$NODE_PUBLIC_KEY" \
-    "Short ID：$NODE_SHORT_ID" \
-    "分享链接：$uri" >> "$client_file"
+    "端口：$NODE_PORT" >> "$client_file"
+  if [[ "$NODE_TYPE" == "ws" ]]; then
+    printf '%s\n' \
+      "服务域名：$NODE_SERVER_NAME" \
+      "WebSocket 路径：$NODE_PATH" \
+      "UUID：$uuid" >> "$client_file"
+  else
+    printf '%s\n' \
+      "伪装域名：$NODE_SERVER_NAME" \
+      "XHTTP 路径：${NODE_PATH:--}" \
+      "UUID：$uuid" \
+      "Public Key：$NODE_PUBLIC_KEY" \
+      "Short ID：$NODE_SHORT_ID" >> "$client_file"
+  fi
+  printf '分享链接：%s\n' "$uri" >> "$client_file"
 }
 
 save_xray_client_info() {
@@ -833,8 +953,11 @@ save_xray_client_info() {
     esac
   fi
 
-  [[ "$NODE_TYPE" == "xhttp" ]] \
-    && label="Rainbow-$(hostname)-XHTTP" || label="Rainbow-$(hostname)-TCP"
+  case "$NODE_TYPE" in
+    xhttp) label="Rainbow-$(hostname)-XHTTP" ;;
+    tcp) label="Rainbow-$(hostname)-TCP" ;;
+    ws) label="Rainbow-$(hostname)-WS" ;;
+  esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
   install -m 0600 /dev/null "$client_file"
@@ -852,16 +975,22 @@ save_xray_client_info() {
       ;;
   esac
 
-  install -m 0600 /dev/null "$all_clients"
-  for type in xhttp tcp; do
-    [[ -f "$XRAY_HOME/client-${type}.txt" ]] || continue
-    [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
-    cat "$XRAY_HOME/client-${type}.txt" >> "$all_clients"
-  done
+  refresh_xray_client_info
 
   printf '\n节点搭建完成：\n'
   cat "$client_file"
   printf '全部客户端信息已保存至：%s\n\n' "$all_clients"
+}
+
+refresh_xray_client_info() {
+  local all_clients="$XRAY_HOME/client.txt" type
+
+  install -m 0600 /dev/null "$all_clients"
+  for type in xhttp tcp ws; do
+    [[ -f "$XRAY_HOME/client-${type}.txt" ]] || continue
+    [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
+    cat "$XRAY_HOME/client-${type}.txt" >> "$all_clients"
+  done
 }
 
 setup_xray_node() {
@@ -878,6 +1007,10 @@ setup_xray_node() {
     printf '搭建节点需要 ss 命令。\n' >&2
     return 1
   }
+  if [[ "$NODE_TYPE" == "ws" ]] && ! valid_acme_certificate; then
+    printf 'VLESS + WebSocket 节点必须先通过证书管理配置有效的 ACME 证书。\n' >&2
+    return 1
+  fi
 
   select_warp_mode
   if [[ "$WARP_MODE" != "direct" ]]; then
@@ -960,14 +1093,16 @@ manage_xray_nodes() {
       '请选择 X-ray 节点类型：' \
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
+      '3) VLESS + TLS + WebSocket + Cloudflare CDN' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2]：' choice
+    read -r -p '请输入 [0/1/2/3]：' choice
     case "$choice" in
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
+      3) NODE_TYPE="ws"; setup_xray_node || true; pause_menu ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
     esac
   done
 }
@@ -1115,7 +1250,8 @@ restore_tls_files() {
 install_tls_certificate() {
   local source_cert=$1 source_key=$2 target_cert=$3 target_key=$4
   local cert_backup="$TMP_DIR/tls-cert.backup" key_backup="$TMP_DIR/tls-key.backup"
-  local had_cert=0 had_key=0
+  local had_cert=0 had_key=0 service
+  local -a services=()
 
   [[ -s "$source_cert" && -s "$source_key" ]] || return 1
   install -d -m 0700 "$(dirname "$target_cert")" || return 1
@@ -1134,14 +1270,32 @@ install_tls_certificate() {
     return 1
   fi
 
-  if [[ -x "$SING_BOX_HOME/sing-box" && -f "$SING_BOX_HOME/config.json" \
+  if [[ -f "$SING_BOX_HOME/config.json" \
     && -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" ]] \
-    && ! systemctl restart "$SING_BOX_SERVICE"; then
-    restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup" \
-      "$target_cert" "$target_key"
-    systemctl restart "$SING_BOX_SERVICE" || true
-    return 1
+    && jq -e --arg cert "$target_cert" --arg key "$target_key" '
+      any(.inbounds[]?;
+        (.tls.certificate_path? == $cert) or (.tls.key_path? == $key))
+    ' "$SING_BOX_HOME/config.json" >/dev/null; then
+    services+=("$SING_BOX_SERVICE")
   fi
+  if [[ -f "$XRAY_HOME/config.json" \
+    && -f "/etc/systemd/system/${XRAY_SERVICE}.service" ]] \
+    && jq -e --arg cert "$target_cert" --arg key "$target_key" '
+      any(.inbounds[]?.streamSettings.tlsSettings.certificates[]?;
+        (.certificateFile? == $cert) or (.keyFile? == $key))
+    ' "$XRAY_HOME/config.json" >/dev/null; then
+    services+=("$XRAY_SERVICE")
+  fi
+  for service in "${services[@]}"; do
+    if ! systemctl restart "$service"; then
+      restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup" \
+        "$target_cert" "$target_key"
+      for service in "${services[@]}"; do
+        systemctl restart "$service" || true
+      done
+      return 1
+    fi
+  done
 }
 
 deploy_acme_certificate() {
@@ -1261,6 +1415,8 @@ configure_acme_certificate() {
 remove_acme_certificate() {
   local answer config_file="$TMP_DIR/remove-acme.json" type
   local config_backup="$TMP_DIR/remove-acme.backup" timer_was_enabled=0
+  local xray_config="$TMP_DIR/remove-acme-xray.json"
+  local xray_backup="$TMP_DIR/remove-acme-xray.backup" ws_removed=0
   local -a removed_types=()
 
   if [[ ! -e "$ACME_TLS_CERT" && ! -e "$ACME_TLS_KEY" \
@@ -1326,6 +1482,38 @@ remove_acme_certificate() {
     fi
   fi
 
+  if [[ -x "$XRAY_HOME/xray" && -f "$XRAY_HOME/config.json" ]] \
+    && jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws")' \
+      "$XRAY_HOME/config.json" >/dev/null; then
+    if ! jq '
+      .inbounds = [(.inbounds // [])[] | select(.tag != "rainbow-vless-ws")]
+      | .routing = ((.routing // {}) | .rules = [
+          (.rules // [])[]
+          | select(((.user // []) | index("rainbow-ws-warp")) == null)
+        ])
+      | ([.routing.rules[]? | select((.outboundTag // "") == "rainbow-warp")]
+          | length > 0) as $needs_warp
+      | if $needs_warp then .
+        else .outbounds = ((.outbounds // [])
+          | map(select((.tag // "") != "rainbow-warp")))
+        end
+    ' "$XRAY_HOME/config.json" > "$xray_config" \
+      || ! "$XRAY_HOME/xray" run -test -config "$xray_config" \
+      || ! install -m 0600 "$XRAY_HOME/config.json" "$xray_backup" \
+      || ! install -m 0600 "$xray_config" "$XRAY_HOME/config.json"; then
+      [[ "$timer_was_enabled" == "0" ]] || systemctl enable --now "$ACME_TIMER" || true
+      return 1
+    fi
+    if [[ -f "/etc/systemd/system/${XRAY_SERVICE}.service" ]] \
+      && ! systemctl restart "$XRAY_SERVICE"; then
+      install -m 0600 "$xray_backup" "$XRAY_HOME/config.json"
+      systemctl restart "$XRAY_SERVICE" || true
+      [[ "$timer_was_enabled" == "0" ]] || systemctl enable --now "$ACME_TIMER" || true
+      return 1
+    fi
+    ws_removed=1
+  fi
+
   rm -f "$ACME_TLS_CERT" "$ACME_TLS_KEY" "$TLS_DOMAIN_FILE" "$ACME_CF_TOKEN_FILE"
   rm -rf "$ACME_DATA_HOME"
   if ((${#removed_types[@]})); then
@@ -1333,6 +1521,10 @@ remove_acme_certificate() {
       rm -f "$SING_BOX_HOME/client-${type}.txt"
     done
     refresh_sing_box_client_info
+  fi
+  if [[ "$ws_removed" == "1" ]]; then
+    rm -f "$XRAY_HOME/client-ws.txt"
+    refresh_xray_client_info
   fi
   log 'ACME 证书及依赖此证书的节点已移除'
 }

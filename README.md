@@ -58,6 +58,32 @@ Token 保存在 `~/rainbow/acme/cf-token`，文件权限为 `0600`。`rainbow-ac
 
 TUIC、AnyTLS、Hysteria2 使用的 A、AAAA 或 CNAME 记录应在 Cloudflare 中设置为 `DNS only`。
 
+## VLESS + WebSocket + Cloudflare CDN
+
+Xray 节点菜单支持创建 `VLESS + TLS + WebSocket + Cloudflare CDN` 节点。该类型强制使用有效的 ACME 证书，不会回退到自签证书；未配置证书时请先进入 `证书管理` 完成申请。
+
+创建节点时输入域名前缀，直接回车默认使用 `cdn`。例如证书根域名为 `example.com`，默认生成的完整节点域名为：
+
+```text
+cdn.example.com
+```
+
+可选端口仅限 Cloudflare 支持代理的 HTTPS 端口：
+
+```text
+443 2053 2083 2087 2096 8443
+```
+
+在 Cloudflare 中添加指向服务器公网 IP 的 A 记录，并开启小黄云：
+
+```text
+名称：cdn
+代理状态：已代理
+SSL/TLS 模式：Full (strict)
+```
+
+客户端连接端口与 Xray 回源监听端口保持一致。移除 ACME 证书时，对应的 WebSocket 节点也会一并移除。
+
 查看续期日志：
 
 ```bash
