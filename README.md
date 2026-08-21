@@ -27,7 +27,9 @@ rb
 
 ## TLS 证书
 
-主菜单会显示当前 TLS 证书模式和有效状态。进入 `TLS 证书管理` 可以在自签证书与已申请的 ACME 证书之间切换。
+主菜单会分别显示自签证书和 ACME 证书状态。自签证书会在初始化时生成，`TLS 证书管理` 只负责 ACME 证书的申请、查看和续期。
+
+两类证书可以同时存在。搭建 TUIC、AnyTLS、Hysteria2 节点时，脚本会优先使用有效的 ACME 证书；未配置、无效或已过期时自动使用自签证书。
 
 申请 ACME 证书时，输入根域名和 Cloudflare API Token。脚本会申请一张同时包含以下域名的 Let's Encrypt 证书：
 
@@ -43,11 +45,13 @@ Zone / Zone / Read
 Zone / DNS / Edit
 ```
 
-证书和私钥保存在：
+证书和私钥分别保存在：
 
 ```text
-~/rainbow/tls/cert.pem
-~/rainbow/tls/key.pem
+~/rainbow/tls/self-signed/cert.pem
+~/rainbow/tls/self-signed/key.pem
+~/rainbow/tls/acme/cert.pem
+~/rainbow/tls/acme/key.pem
 ```
 
 Token 保存在 `~/rainbow/acme/cf-token`，文件权限为 `0600`。`rainbow-acme.timer` 每天检查续期，只有证书发生变化时才会重启 sing-box。
