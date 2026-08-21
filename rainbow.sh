@@ -113,10 +113,11 @@ select_action() {
     '4) 搭建 sing-box 节点' \
     '5) 查看所有节点' \
     '6) 更新 rainbow' \
+    '7) 一键卸载' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
     case "$choice" in
       1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
       2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
@@ -124,7 +125,8 @@ select_action() {
       4) ACTION="sing-box-node"; return ;;
       5) ACTION="show-nodes"; return ;;
       6) ACTION="update"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5 或 6。\n' >&2 ;;
+      7) ACTION="uninstall"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
     esac
   done
 }
@@ -159,6 +161,34 @@ download() {
 update_rainbow() {
   download_rainbow
   log "rainbow 已更新：${RAINBOW_BIN}"
+}
+
+uninstall_rainbow() {
+  local answer service
+
+  printf '%s\n' \
+    '此操作将停止并删除 Rainbow 管理的 Xray、sing-box、节点配置和 rb 命令。' \
+    '删除后无法恢复。'
+  read -r -p '请输入 UNINSTALL 确认卸载：' answer
+  [[ "$answer" == "UNINSTALL" ]] || {
+    printf '已取消卸载。\n'
+    return 1
+  }
+
+  for service in "$XRAY_SERVICE" "$SING_BOX_SERVICE"; do
+    systemctl cat "$service" >/dev/null 2>&1 || continue
+    systemctl disable --now "$service" || {
+      printf '停止服务 %s 失败，卸载已中止。\n' "$service" >&2
+      return 1
+    }
+  done
+
+  rm -f "/etc/systemd/system/${XRAY_SERVICE}.service" \
+    "/etc/systemd/system/${SING_BOX_SERVICE}.service" || return
+  systemctl daemon-reload || return
+  rm -rf -- "$RAINBOW_HOME" || return
+  rm -f -- "$RAINBOW_BIN" || return
+  printf 'Rainbow 已卸载。\n'
 }
 
 verify_sha256() {
@@ -1209,6 +1239,11 @@ main() {
     show_installation_status
     select_action
 
+    if [[ "$ACTION" == "uninstall" ]]; then
+      uninstall_rainbow && exit
+      pause_menu
+      continue
+    fi
     if [[ "$ACTION" == "update" ]]; then
       update_rainbow
       pause_menu
