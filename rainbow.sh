@@ -33,6 +33,20 @@ detect_arch() {
   esac
 }
 
+show_installation_status() {
+  local product binary_path
+
+  printf '%s\n' '当前安装状态：'
+  for product in sing-box xray; do
+    if binary_path=$(command -v "$product" 2>/dev/null); then
+      printf '  %-8s 已安装（路径：%s）\n' "$product" "$binary_path"
+    else
+      printf '  %-8s 未安装（路径：-）\n' "$product"
+    fi
+  done
+  printf '\n'
+}
+
 select_product() {
   printf '%s\n' \
     '请选择要安装的程序：' \
@@ -192,6 +206,7 @@ main() {
   require_root
   require_commands
   detect_arch
+  show_installation_status
   select_product
   read_version
 
