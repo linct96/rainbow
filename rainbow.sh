@@ -9,6 +9,10 @@ readonly RAINBOW_BIN="/usr/local/bin/rb"
 readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
 readonly SING_BOX_HOME="$RAINBOW_HOME/sing-box"
 readonly XRAY_HOME="$RAINBOW_HOME/xray"
+readonly SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
+readonly SING_BOX_CERT="$SING_BOX_TLS_HOME/cert.pem"
+readonly SING_BOX_KEY="$SING_BOX_TLS_HOME/key.pem"
+readonly SING_BOX_TLS_SERVER_NAME="rainbow.local"
 readonly SING_BOX_SERVICE="rainbow-sing-box"
 readonly XRAY_SERVICE="rainbow-xray"
 
@@ -101,17 +105,19 @@ select_action() {
     '1) sing-box' \
     '2) Xray' \
     '3) 搭建 X-ray 节点' \
-    '4) 更新 rainbow' \
+    '4) 搭建 sing-box 节点' \
+    '5) 更新 rainbow' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4]：' choice
+    read -r -p '请输入 [1/2/3/4/5]：' choice
     case "$choice" in
       1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
       2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
-      3) ACTION="node"; return ;;
-      4) ACTION="update"; return ;;
-      *) printf '无效选项，请输入 1、2、3 或 4。\n' >&2 ;;
+      3) ACTION="xray-node"; return ;;
+      4) ACTION="sing-box-node"; return ;;
+      5) ACTION="update"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4 或 5。\n' >&2 ;;
     esac
   done
 }
@@ -265,7 +271,10 @@ random_hex() {
 }
 
 port_in_use() {
-  ss -H -ltn | awk -v port="$1" '
+  local flags="-ltn" port=$1 protocol=${2:-tcp}
+  [[ "$protocol" == "udp" ]] && flags="-lun"
+
+  ss -H "$flags" | awk -v port="$port" '
     {
       endpoint = $4
       sub(/^.*:/, "", endpoint)
@@ -276,11 +285,11 @@ port_in_use() {
 }
 
 random_high_port() {
-  local i port
+  local i port protocol=${1:-tcp}
 
   for ((i = 0; i < 100; i++)); do
     port=$((10000 + $(od -An -N 4 -tu4 /dev/urandom) % 55536))
-    if ! port_in_use "$port"; then
+    if ! port_in_use "$port" "$protocol"; then
       printf '%s\n' "$port"
       return
     fi
@@ -290,12 +299,12 @@ random_high_port() {
 }
 
 read_node_port() {
-  local input port
+  local input port protocol=${1:-tcp}
 
   while true; do
     read -r -p '请输入监听端口（直接回车随机生成）：' input
     if [[ -z "$input" ]]; then
-      NODE_PORT=$(random_high_port) || {
+      NODE_PORT=$(random_high_port "$protocol") || {
         printf '未找到可用的随机端口。\n' >&2
         return 1
       }
@@ -309,7 +318,7 @@ read_node_port() {
       port=$((10#$input))
       if ((port < 1 || port > 65535)); then
         printf '端口必须是 1 到 65535 之间的整数。\n' >&2
-      elif port_in_use "$port"; then
+      elif port_in_use "$port" "$protocol"; then
         printf '端口 %s 已被占用。\n' "$port" >&2
       else
         NODE_PORT=$port
@@ -326,10 +335,8 @@ detect_public_ipv4() {
   printf '%s\n' "$address"
 }
 
-read_node_details() {
+read_node_address() {
   local default_address input
-
-  read_node_port || return
   default_address=$(detect_public_ipv4 || true)
 
   while true; do
@@ -339,9 +346,16 @@ read_node_details() {
     else
       read -r -p '请输入节点 IP 或域名：' NODE_ADDRESS
     fi
-    [[ "$NODE_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] && break
+    [[ "$NODE_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] && return
     printf '节点地址格式错误。\n' >&2
   done
+}
+
+read_node_details() {
+  local input
+
+  read_node_port || return
+  read_node_address
 
   read -r -p '请输入 REALITY 伪装域名（直接回车使用 www.apple.com）：' input
   NODE_SERVER_NAME=${input:-www.apple.com}
@@ -534,14 +548,15 @@ setup_xray_node() {
   save_xray_client_info
 }
 
-show_enabled_xray_nodes() {
+show_enabled_nodes() {
+  local client_file=$2 service=$1 service_name=$3
+
   clear_screen
   show_header '已启用节点'
 
-  if ! systemctl is-active --quiet "$XRAY_SERVICE"; then
-    printf 'Xray 服务未运行，暂无已启用节点。\n'
-  elif [[ ! -s "$XRAY_HOME/client.txt" ]] \
-    || ! grep -q '^分享链接：' "$XRAY_HOME/client.txt"; then
+  if ! systemctl is-active --quiet "$service"; then
+    printf '%s 服务未运行，暂无已启用节点。\n' "$service_name"
+  elif [[ ! -s "$client_file" ]] || ! grep -q '^分享链接：' "$client_file"; then
     printf '暂无可展示的节点信息。\n'
   else
     awk '
@@ -550,10 +565,14 @@ show_enabled_xray_nodes() {
         if (shown++) print ""
         print
       }
-    ' "$XRAY_HOME/client.txt"
+    ' "$client_file"
   fi
 
   pause_menu
+}
+
+show_enabled_xray_nodes() {
+  show_enabled_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
 }
 
 manage_xray_nodes() {
@@ -574,6 +593,194 @@ manage_xray_nodes() {
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
       3) show_enabled_xray_nodes ;;
+      0) return ;;
+      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+    esac
+  done
+}
+
+sing_box_supports_anytls() {
+  local major minor version
+  version=$("$SING_BOX_HOME/sing-box" version | awk 'NR == 1 {print $3}')
+  [[ "$version" =~ ^([0-9]+)[.]([0-9]+) ]] || return 1
+  major=${BASH_REMATCH[1]}
+  minor=${BASH_REMATCH[2]}
+  ((major > 1 || (major == 1 && minor >= 12)))
+}
+
+ensure_sing_box_certificate() {
+  local cert_file="$TMP_DIR/sing-box-cert.pem" key_file="$TMP_DIR/sing-box-key.pem"
+
+  if [[ -f "$SING_BOX_CERT" && -f "$SING_BOX_KEY" ]]; then
+    return
+  fi
+
+  install -d -m 0700 "$SING_BOX_TLS_HOME" || return 1
+  openssl ecparam -name prime256v1 -genkey -noout -out "$key_file" || return 1
+  openssl req -new -x509 -sha256 -days 3650 \
+    -key "$key_file" -out "$cert_file" -subj "/CN=${SING_BOX_TLS_SERVER_NAME}" || return 1
+  install -m 0644 "$cert_file" "$SING_BOX_CERT" || return 1
+  install -m 0600 "$key_file" "$SING_BOX_KEY" || return 1
+  log "已生成 sing-box 自签名 TLS 证书"
+}
+
+read_sing_box_node_details() {
+  local protocol="tcp"
+  [[ "$SING_NODE_TYPE" == "tuic" ]] && protocol="udp"
+  read_node_port "$protocol" || return
+  read_node_address
+}
+
+write_sing_box_node_config() {
+  local current_config=$1 config_file=$2 tag="rainbow-${SING_NODE_TYPE}"
+
+  jq \
+    --arg type "$SING_NODE_TYPE" \
+    --arg tag "$tag" \
+    --argjson port "$NODE_PORT" \
+    --arg uuid "${SING_NODE_UUID:-}" \
+    --arg password "$SING_NODE_PASSWORD" \
+    --arg certificate_path "$SING_BOX_CERT" \
+    --arg key_path "$SING_BOX_KEY" '
+      .inbounds = (
+        ((.inbounds // []) | map(select((.tag // "") != $tag))) + [
+          ({
+            type: $type,
+            tag: $tag,
+            listen: "0.0.0.0",
+            listen_port: $port,
+            users: (if $type == "tuic" then [{
+              name: "rainbow",
+              uuid: $uuid,
+              password: $password
+            }] else [{
+              name: "rainbow",
+              password: $password
+            }] end),
+            tls: ({
+              enabled: true,
+              certificate_path: $certificate_path,
+              key_path: $key_path
+            } + if $type == "tuic" then {alpn: ["h3"]} else {} end)
+          } + if $type == "tuic" then {
+            congestion_control: "bbr",
+            zero_rtt_handshake: false
+          } else {} end)
+        ]
+      )
+    ' "$current_config" > "$config_file"
+}
+
+save_sing_box_client_info() {
+  local all_clients="$SING_BOX_HOME/client.txt"
+  local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label uri
+
+  if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
+    label="Rainbow-TUIC"
+    uri="tuic://${SING_NODE_UUID}:${SING_NODE_PASSWORD}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&allow_insecure=1&udp_relay_mode=native#${label}"
+  else
+    label="Rainbow-AnyTLS"
+    uri="anytls://${SING_NODE_PASSWORD}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}&insecure=1#${label}"
+  fi
+
+  install -m 0600 /dev/null "$client_file"
+  printf '%s\n' \
+    "类型：$label" \
+    "地址：$NODE_ADDRESS" \
+    "端口：$NODE_PORT" \
+    "TLS SNI：$SING_BOX_TLS_SERVER_NAME" \
+    "UUID：${SING_NODE_UUID:--}" \
+    "密码：$SING_NODE_PASSWORD" \
+    "分享链接：$uri" > "$client_file"
+
+  install -m 0600 /dev/null "$all_clients"
+  for type in tuic anytls; do
+    [[ -f "$SING_BOX_HOME/client-${type}.txt" ]] || continue
+    [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
+    cat "$SING_BOX_HOME/client-${type}.txt" >> "$all_clients"
+  done
+
+  printf '\n节点搭建完成：\n'
+  cat "$client_file"
+  printf '全部客户端信息已保存至：%s\n' "$all_clients"
+  printf '请在服务器防火墙中开放端口：%s/%s\n\n' \
+    "$NODE_PORT" "$([[ "$SING_NODE_TYPE" == "tuic" ]] && printf udp || printf tcp)"
+}
+
+setup_sing_box_node() {
+  local backup_file command_name config_file="$TMP_DIR/sing-box-node-config.json"
+  local service_file="/etc/systemd/system/${SING_BOX_SERVICE}.service"
+
+  if [[ ! -x "$SING_BOX_HOME/sing-box" || ! -f "$SING_BOX_HOME/config.json" \
+    || ! -f "$service_file" ]] \
+    || ! grep -qx \
+      "ExecStart=$SING_BOX_HOME/sing-box run -c $SING_BOX_HOME/config.json" "$service_file"; then
+    printf '请先通过 Rainbow 安装 sing-box。\n' >&2
+    return 1
+  fi
+  for command_name in openssl ss; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+      printf '搭建 sing-box 节点需要 %s 命令。\n' "$command_name" >&2
+      return 1
+    }
+  done
+  if [[ "$SING_NODE_TYPE" == "anytls" ]] && ! sing_box_supports_anytls; then
+    printf 'AnyTLS 需要 sing-box 1.12.0 或更高版本。\n' >&2
+    return 1
+  fi
+
+  read_sing_box_node_details || return
+  ensure_sing_box_certificate || {
+    printf '生成 sing-box TLS 证书失败。\n' >&2
+    return 1
+  }
+  SING_NODE_PASSWORD=$(random_hex 16)
+  SING_NODE_UUID=""
+  if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
+    SING_NODE_UUID=$("$SING_BOX_HOME/sing-box" generate uuid) || {
+      printf '生成 TUIC UUID 失败。\n' >&2
+      return 1
+    }
+  fi
+
+  write_sing_box_node_config "$SING_BOX_HOME/config.json" "$config_file"
+  "$SING_BOX_HOME/sing-box" check -c "$config_file" || {
+    printf 'sing-box 配置验证失败，原配置未修改。\n' >&2
+    return 1
+  }
+
+  backup_file=$(mktemp "$SING_BOX_HOME/config.json.backup.XXXXXX")
+  install -m 0600 "$SING_BOX_HOME/config.json" "$backup_file"
+  install -m 0600 "$config_file" "$SING_BOX_HOME/config.json"
+  if ! systemctl restart "$SING_BOX_SERVICE"; then
+    install -m 0600 "$backup_file" "$SING_BOX_HOME/config.json"
+    systemctl restart "$SING_BOX_SERVICE" || true
+    printf 'sing-box 启动失败，已恢复原配置：%s\n' "$backup_file" >&2
+    return 1
+  fi
+
+  log "原配置已备份：$backup_file"
+  save_sing_box_client_info
+}
+
+manage_sing_box_nodes() {
+  local choice
+
+  while true; do
+    clear_screen
+    show_header 'sing-box 节点'
+    printf '%s\n' \
+      '请选择 sing-box 节点类型：' \
+      '1) TUIC' \
+      '2) AnyTLS' \
+      '3) 查看已启用节点' \
+      '0) 返回' \
+      ''
+    read -r -p '请输入 [0/1/2/3]：' choice
+    case "$choice" in
+      1) SING_NODE_TYPE="tuic"; setup_sing_box_node || true; pause_menu ;;
+      2) SING_NODE_TYPE="anytls"; setup_sing_box_node || true; pause_menu ;;
+      3) show_enabled_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box' ;;
       0) return ;;
       *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
     esac
@@ -601,8 +808,12 @@ main() {
       pause_menu
       continue
     fi
-    if [[ "$ACTION" == "node" ]]; then
+    if [[ "$ACTION" == "xray-node" ]]; then
       manage_xray_nodes
+      continue
+    fi
+    if [[ "$ACTION" == "sing-box-node" ]]; then
+      manage_sing_box_nodes
       continue
     fi
 
