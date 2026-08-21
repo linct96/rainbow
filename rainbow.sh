@@ -4,6 +4,8 @@ set -Eeuo pipefail
 
 readonly SING_BOX_REPO="SagerNet/sing-box"
 readonly XRAY_REPO="XTLS/Xray-core"
+readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
+readonly RAINBOW_BIN="/usr/local/bin/rb"
 
 log() {
   printf '[安装] %s\n' "$*"
@@ -33,6 +35,30 @@ detect_arch() {
   esac
 }
 
+install_rainbow_command() {
+  local source_file=${BASH_SOURCE[0]} action="安装"
+
+  if [[ -e "$RAINBOW_BIN" && "$source_file" -ef "$RAINBOW_BIN" ]]; then
+    return
+  fi
+
+  if [[ -e "$RAINBOW_BIN" ]]; then
+    action="更新"
+  fi
+
+  download_rainbow
+  log "rb 命令已${action}：${RAINBOW_BIN}"
+}
+
+download_rainbow() {
+  local update_file="$TMP_DIR/rainbow.sh"
+
+  download "$RAINBOW_URL" "$update_file"
+  bash -n "$update_file" || die "更新脚本语法检查失败"
+  install -d -m 0755 /usr/local/bin
+  install -m 0755 "$update_file" "$RAINBOW_BIN"
+}
+
 show_installation_status() {
   local product binary_path
 
@@ -47,18 +73,20 @@ show_installation_status() {
   printf '\n'
 }
 
-select_product() {
+select_action() {
   printf '%s\n' \
-    '请选择要安装的程序：' \
+    '请选择操作：' \
     '1) sing-box' \
-    '2) Xray'
+    '2) Xray' \
+    '3) 更新 rainbow'
 
   while true; do
-    read -r -p '请输入 [1/2]：' choice
+    read -r -p '请输入 [1/2/3]：' choice
     case "$choice" in
-      1) PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
-      2) PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
-      *) printf '无效选项，请输入 1 或 2。\n' >&2 ;;
+      1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
+      2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
+      3) ACTION="update"; return ;;
+      *) printf '无效选项，请输入 1、2 或 3。\n' >&2 ;;
     esac
   done
 }
@@ -88,6 +116,11 @@ download() {
   local url=$1 output=$2
   curl --retry 3 -fL "$url" -o "$output" \
     || die "下载失败：${url}"
+}
+
+update_rainbow() {
+  download_rainbow
+  log "rainbow 已更新：${RAINBOW_BIN}"
 }
 
 verify_sha256() {
@@ -205,14 +238,22 @@ EOF
 main() {
   require_root
   require_commands
-  detect_arch
-  show_installation_status
-  select_product
-  read_version
 
   TMP_DIR=$(mktemp -d)
   readonly TMP_DIR
   trap 'rm -rf "$TMP_DIR"' EXIT
+
+  install_rainbow_command
+  show_installation_status
+  select_action
+
+  if [[ "$ACTION" == "update" ]]; then
+    update_rainbow
+    return
+  fi
+
+  detect_arch
+  read_version
 
   case "$PRODUCT" in
     sing-box) install_sing_box ;;
