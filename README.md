@@ -25,7 +25,7 @@ rb
 
 ## ACME TLS 证书
 
-在主菜单选择 `TLS 证书管理`，输入根域名、ACME 联系邮箱和 Cloudflare API Token。脚本会申请一张同时包含以下域名的 Let's Encrypt 证书：
+在主菜单选择 `TLS 证书管理`，输入根域名和 Cloudflare API Token。脚本会申请一张同时包含以下域名的 Let's Encrypt 证书：
 
 ```text
 example.com

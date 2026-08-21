@@ -24,7 +24,6 @@ readonly LEGACY_SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
 readonly ACME_HOME="$RAINBOW_HOME/acme"
 readonly ACME_BIN="$ACME_HOME/lego"
 readonly ACME_DATA_HOME="$ACME_HOME/data"
-readonly ACME_EMAIL_FILE="$ACME_HOME/email"
 readonly ACME_CF_TOKEN_FILE="$ACME_HOME/cf-token"
 readonly ACME_SERVICE="rainbow-acme"
 readonly ACME_TIMER="rainbow-acme.timer"
@@ -946,8 +945,12 @@ valid_domain() {
   done
 }
 
-valid_email() {
-  [[ $1 =~ ^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$ ]]
+normalize_domain() {
+  local domain=${1//$'\r'/}
+  domain=${domain#"${domain%%[![:space:]]*}"}
+  domain=${domain%"${domain##*[![:space:]]}"}
+  domain=${domain%.}
+  printf '%s\n' "$domain" | tr '[:upper:]' '[:lower:]'
 }
 
 load_tls_settings() {
@@ -1010,11 +1013,10 @@ install_lego() {
 }
 
 run_lego() {
-  local domain=$1 email=$2 token_file=$3
+  local domain=$1 token_file=$2
   CF_DNS_API_TOKEN_FILE="$token_file" "$ACME_BIN" run \
     --accept-tos \
     --server letsencrypt \
-    --email "$email" \
     --dns cloudflare \
     --domains "$domain" \
     --domains "*.$domain" \
@@ -1151,8 +1153,8 @@ EOF
 }
 
 configure_acme_certificate() {
-  local domain email token answer current_domain=""
-  local token_file email_file domain_file mode_file command_name
+  local domain token answer current_domain=""
+  local token_file domain_file mode_file command_name
 
   for command_name in openssl tar; do
     command -v "$command_name" >/dev/null 2>&1 || {
@@ -1162,7 +1164,7 @@ configure_acme_certificate() {
   done
   while true; do
     read -r -p '请输入根域名，例如 example.com：' domain
-    domain=${domain,,}
+    domain=$(normalize_domain "$domain")
     valid_domain "$domain" && break
     printf '根域名格式错误。\n' >&2
   done
@@ -1177,11 +1179,6 @@ configure_acme_certificate() {
       return 1
     }
   fi
-  while true; do
-    read -r -p '请输入 ACME 联系邮箱：' email
-    valid_email "$email" && break
-    printf '邮箱格式错误。\n' >&2
-  done
   read -r -s -p '请输入 Cloudflare API Token：' token
   printf '\n'
   [[ -n "$token" ]] || {
@@ -1196,21 +1193,19 @@ configure_acme_certificate() {
   }
 
   token_file="$TMP_DIR/cf-token"
-  email_file="$TMP_DIR/acme-email"
   domain_file="$TMP_DIR/acme-domain"
   mode_file="$TMP_DIR/tls-mode"
   printf '%s' "$token" > "$token_file"
-  printf '%s\n' "$email" > "$email_file"
   printf '%s\n' "$domain" > "$domain_file"
   printf '%s\n' 'acme' > "$mode_file"
-  chmod 0600 "$token_file" "$email_file" "$domain_file" "$mode_file"
+  chmod 0600 "$token_file" "$domain_file" "$mode_file"
   unset token
 
   install_lego || {
     printf '安装 lego 失败。\n' >&2
     return 1
   }
-  run_lego "$domain" "$email" "$token_file" || {
+  run_lego "$domain" "$token_file" || {
     printf 'ACME 证书签发失败，现有证书未修改。\n' >&2
     return 1
   }
@@ -1221,7 +1216,6 @@ configure_acme_certificate() {
 
   install -d -m 0700 "$ACME_HOME" "$TLS_HOME"
   install -m 0600 "$token_file" "$ACME_CF_TOKEN_FILE"
-  install -m 0600 "$email_file" "$ACME_EMAIL_FILE"
   install -m 0600 "$domain_file" "$TLS_DOMAIN_FILE"
   install -m 0600 "$mode_file" "$TLS_MODE_FILE"
   install_acme_timer || {
@@ -1235,18 +1229,17 @@ configure_acme_certificate() {
 }
 
 renew_acme_certificate() {
-  local domain email before_digest="" after_digest command_name
+  local domain before_digest="" after_digest command_name
   for command_name in openssl sha256sum; do
     command -v "$command_name" >/dev/null 2>&1 || return 1
   done
-  [[ -x "$ACME_BIN" && -s "$ACME_EMAIL_FILE" && -s "$ACME_CF_TOKEN_FILE" \
+  [[ -x "$ACME_BIN" && -s "$ACME_CF_TOKEN_FILE" \
     && -s "$TLS_DOMAIN_FILE" && -s "$TLS_MODE_FILE" ]] || return 1
   IFS= read -r domain < "$TLS_DOMAIN_FILE"
-  IFS= read -r email < "$ACME_EMAIL_FILE"
-  valid_domain "$domain" && valid_email "$email" || return 1
+  valid_domain "$domain" || return 1
   [[ -f "$TLS_CERT" ]] && before_digest=$(sha256sum "$TLS_CERT" | awk '{print $1}')
 
-  run_lego "$domain" "$email" "$ACME_CF_TOKEN_FILE" || return 1
+  run_lego "$domain" "$ACME_CF_TOKEN_FILE" || return 1
   after_digest=$(sha256sum "$ACME_DATA_HOME/certificates/${domain}.crt" | awk '{print $1}')
   if [[ -n "$before_digest" && "$before_digest" == "$after_digest" ]]; then
     log 'ACME 证书暂不需要续期'
