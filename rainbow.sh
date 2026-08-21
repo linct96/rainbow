@@ -6,6 +6,11 @@ readonly SING_BOX_REPO="SagerNet/sing-box"
 readonly XRAY_REPO="XTLS/Xray-core"
 readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
 readonly RAINBOW_BIN="/usr/local/bin/rb"
+readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
+readonly SING_BOX_HOME="$RAINBOW_HOME/sing-box"
+readonly XRAY_HOME="$RAINBOW_HOME/xray"
+readonly SING_BOX_SERVICE="rainbow-sing-box"
+readonly XRAY_SERVICE="rainbow-xray"
 
 log() {
   printf '[安装] %s\n' "$*"
@@ -64,7 +69,8 @@ show_installation_status() {
 
   printf '%s\n' '当前安装状态：'
   for product in sing-box xray; do
-    if binary_path=$(command -v "$product" 2>/dev/null); then
+    binary_path="$RAINBOW_HOME/$product/$product"
+    if [[ -x "$binary_path" ]]; then
       printf '  %-8s 已安装（路径：%s）\n' "$product" "$binary_path"
     else
       printf '  %-8s 未安装（路径：-）\n' "$product"
@@ -148,22 +154,22 @@ install_sing_box() {
 
   tar -xzf "$TMP_DIR/$archive_name" -C "$TMP_DIR"
   extracted_dir="$TMP_DIR/sing-box-${VERSION_NUMBER}-linux-${ARCH}"
-  install -m 0755 "$extracted_dir/sing-box" /usr/local/bin/sing-box
-  install -d -m 0755 /etc/sing-box
+  install -d -m 0755 "$SING_BOX_HOME"
+  install -m 0755 "$extracted_dir/sing-box" "$SING_BOX_HOME/sing-box"
 
-  if [[ ! -e /etc/sing-box/config.json ]]; then
-    install -m 0644 /dev/null /etc/sing-box/config.json
-    printf '%s\n' '{"log":{"level":"info"},"inbounds":[]}' > /etc/sing-box/config.json
+  if [[ ! -e "$SING_BOX_HOME/config.json" ]]; then
+    install -m 0644 /dev/null "$SING_BOX_HOME/config.json"
+    printf '%s\n' '{"log":{"level":"info"},"inbounds":[]}' > "$SING_BOX_HOME/config.json"
   fi
 
-  install -m 0644 /dev/null /etc/systemd/system/sing-box.service
-  cat > /etc/systemd/system/sing-box.service <<'EOF'
+  install -m 0644 /dev/null "/etc/systemd/system/${SING_BOX_SERVICE}.service"
+  cat > "/etc/systemd/system/${SING_BOX_SERVICE}.service" <<EOF
 [Unit]
-Description=sing-box service
+Description=Rainbow sing-box service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=$SING_BOX_HOME/sing-box run -c $SING_BOX_HOME/config.json
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=infinity
@@ -172,12 +178,12 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-  /usr/local/bin/sing-box check -c /etc/sing-box/config.json
+  "$SING_BOX_HOME/sing-box" check -c "$SING_BOX_HOME/config.json"
   systemctl daemon-reload
-  systemctl enable sing-box
-  systemctl restart sing-box
-  /usr/local/bin/sing-box version
-  systemctl --no-pager --full status sing-box || true
+  systemctl enable "$SING_BOX_SERVICE"
+  systemctl restart "$SING_BOX_SERVICE"
+  "$SING_BOX_HOME/sing-box" version
+  systemctl --no-pager --full status "$SING_BOX_SERVICE" || true
 }
 
 install_xray() {
@@ -200,25 +206,25 @@ install_xray() {
   verify_sha256 "$TMP_DIR/$archive_name" "${expected,,}"
 
   unzip -q "$TMP_DIR/$archive_name" -d "$TMP_DIR/xray"
-  install -m 0755 "$TMP_DIR/xray/xray" /usr/local/bin/xray
-  install -d -m 0755 /usr/local/share/xray /etc/xray
-  install -m 0644 "$TMP_DIR/xray/geoip.dat" "$TMP_DIR/xray/geosite.dat" /usr/local/share/xray/
+  install -d -m 0755 "$XRAY_HOME"
+  install -m 0755 "$TMP_DIR/xray/xray" "$XRAY_HOME/xray"
+  install -m 0644 "$TMP_DIR/xray/geoip.dat" "$TMP_DIR/xray/geosite.dat" "$XRAY_HOME/"
 
-  if [[ ! -e /etc/xray/config.json ]]; then
-    install -m 0644 /dev/null /etc/xray/config.json
+  if [[ ! -e "$XRAY_HOME/config.json" ]]; then
+    install -m 0644 /dev/null "$XRAY_HOME/config.json"
     printf '%s\n' '{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom"}]}' \
-      > /etc/xray/config.json
+      > "$XRAY_HOME/config.json"
   fi
 
-  install -m 0644 /dev/null /etc/systemd/system/xray.service
-  cat > /etc/systemd/system/xray.service <<'EOF'
+  install -m 0644 /dev/null "/etc/systemd/system/${XRAY_SERVICE}.service"
+  cat > "/etc/systemd/system/${XRAY_SERVICE}.service" <<EOF
 [Unit]
-Description=Xray service
+Description=Rainbow Xray service
 After=network.target
 
 [Service]
-Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
-ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
+Environment=XRAY_LOCATION_ASSET=$XRAY_HOME
+ExecStart=$XRAY_HOME/xray run -config $XRAY_HOME/config.json
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=infinity
@@ -227,12 +233,12 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-  /usr/local/bin/xray run -test -config /etc/xray/config.json
+  "$XRAY_HOME/xray" run -test -config "$XRAY_HOME/config.json"
   systemctl daemon-reload
-  systemctl enable xray
-  systemctl restart xray
-  /usr/local/bin/xray version
-  systemctl --no-pager --full status xray || true
+  systemctl enable "$XRAY_SERVICE"
+  systemctl restart "$XRAY_SERVICE"
+  "$XRAY_HOME/xray" version
+  systemctl --no-pager --full status "$XRAY_SERVICE" || true
 }
 
 main() {
