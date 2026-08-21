@@ -1045,6 +1045,7 @@ write_sing_box_tls_paths() {
       .inbounds = ((.inbounds // []) | map(
         if ((.tag // "") == "rainbow-tuic")
           or ((.tag // "") == "rainbow-anytls")
+          or ((.tag // "") == "rainbow-hysteria2")
           or (.tls.certificate_path? == $legacy_cert)
           or (.tls.key_path? == $legacy_key)
         then .tls.certificate_path = $cert | .tls.key_path = $key
@@ -1223,7 +1224,9 @@ configure_acme_certificate() {
     return 1
   }
   log "ACME 证书已安装：$TLS_CERT"
-  if [[ -f "$SING_BOX_HOME/client-tuic.txt" || -f "$SING_BOX_HOME/client-anytls.txt" ]]; then
+  if [[ -f "$SING_BOX_HOME/client-tuic.txt" \
+    || -f "$SING_BOX_HOME/client-anytls.txt" \
+    || -f "$SING_BOX_HOME/client-hysteria2.txt" ]]; then
     printf '已有客户端配置仍可连接，但请重新搭建节点以生成启用证书校验的新链接。\n'
   fi
 }
@@ -1316,6 +1319,10 @@ sing_box_supports_anytls() {
   sing_box_version_at_least 12
 }
 
+sing_box_supports_hysteria2() {
+  sing_box_version_at_least 5
+}
+
 sing_box_supports_wireguard_endpoint() {
   sing_box_version_at_least 11
 }
@@ -1355,7 +1362,8 @@ ensure_sing_box_certificate() {
 
 read_sing_box_node_details() {
   local protocol="tcp"
-  [[ "$SING_NODE_TYPE" == "tuic" ]] && protocol="udp"
+  [[ "$SING_NODE_TYPE" == "tuic" || "$SING_NODE_TYPE" == "hysteria2" ]] \
+    && protocol="udp"
   read_node_port "$protocol" || return
   read_node_address
 }
@@ -1407,6 +1415,7 @@ write_sing_box_node_config() {
         ((.inbounds // []) | map(
           if ((.tag // "") == "rainbow-tuic")
             or ((.tag // "") == "rainbow-anytls")
+            or ((.tag // "") == "rainbow-hysteria2")
             or (.tls.certificate_path? == $legacy_certificate_path)
             or (.tls.key_path? == $legacy_key_path)
           then .tls.certificate_path = $certificate_path
@@ -1473,15 +1482,23 @@ write_sing_box_node_config() {
 write_sing_box_client_block() {
   local client_file=$1 uuid=$2 password=$3 label=$4 outbound=$5 uri
 
-  if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
-    uri="tuic://${uuid}:${password}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&udp_relay_mode=native"
-    [[ "$TLS_MODE" == "acme" ]] || uri+="&allow_insecure=1"
-    uri+="#${label}"
-  else
-    uri="anytls://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}"
-    [[ "$TLS_MODE" == "acme" ]] || uri+="&insecure=1"
-    uri+="#${label}"
-  fi
+  case "$SING_NODE_TYPE" in
+    tuic)
+      uri="tuic://${uuid}:${password}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&udp_relay_mode=native"
+      [[ "$TLS_MODE" == "acme" ]] || uri+="&allow_insecure=1"
+      ;;
+    anytls)
+      uri="anytls://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}"
+      [[ "$TLS_MODE" == "acme" ]] || uri+="&insecure=1"
+      ;;
+    hysteria2)
+      uri="hysteria2://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}"
+      if [[ "$TLS_MODE" != "acme" ]]; then
+        uri+="&insecure=1&pinSHA256=${SING_BOX_CERT_SHA256}"
+      fi
+      ;;
+  esac
+  uri+="#${label}"
 
   printf '%s\n' \
     "类型：$label" \
@@ -1498,8 +1515,11 @@ save_sing_box_client_info() {
   local all_clients="$SING_BOX_HOME/client.txt"
   local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label
 
-  [[ "$SING_NODE_TYPE" == "tuic" ]] \
-    && label="Rainbow-$(hostname)-TUIC" || label="Rainbow-$(hostname)-AnyTLS"
+  case "$SING_NODE_TYPE" in
+    tuic) label="Rainbow-$(hostname)-TUIC" ;;
+    anytls) label="Rainbow-$(hostname)-AnyTLS" ;;
+    hysteria2) label="Rainbow-$(hostname)-HY2" ;;
+  esac
   install -m 0600 /dev/null "$client_file"
   case "$WARP_MODE" in
     direct)
@@ -1520,7 +1540,7 @@ save_sing_box_client_info() {
   esac
 
   install -m 0600 /dev/null "$all_clients"
-  for type in tuic anytls; do
+  for type in tuic anytls hysteria2; do
     [[ -f "$SING_BOX_HOME/client-${type}.txt" ]] || continue
     [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
     cat "$SING_BOX_HOME/client-${type}.txt" >> "$all_clients"
@@ -1530,7 +1550,7 @@ save_sing_box_client_info() {
   cat "$client_file"
   printf '全部客户端信息已保存至：%s\n' "$all_clients"
   printf '请在服务器防火墙中开放端口：%s/%s\n\n' \
-    "$NODE_PORT" "$([[ "$SING_NODE_TYPE" == "tuic" ]] && printf udp || printf tcp)"
+    "$NODE_PORT" "$([[ "$SING_NODE_TYPE" == "anytls" ]] && printf tcp || printf udp)"
 }
 
 setup_sing_box_node() {
@@ -1552,6 +1572,10 @@ setup_sing_box_node() {
   done
   if [[ "$SING_NODE_TYPE" == "anytls" ]] && ! sing_box_supports_anytls; then
     printf 'AnyTLS 需要 sing-box 1.12.0 或更高版本。\n' >&2
+    return 1
+  fi
+  if [[ "$SING_NODE_TYPE" == "hysteria2" ]] && ! sing_box_supports_hysteria2; then
+    printf 'Hysteria2 需要 sing-box 1.5.0 或更高版本。\n' >&2
     return 1
   fi
   select_warp_mode
@@ -1581,6 +1605,14 @@ setup_sing_box_node() {
     return 1
   }
   select_sing_box_tls_server_name
+  SING_BOX_CERT_SHA256=""
+  if [[ "$SING_NODE_TYPE" == "hysteria2" && "$TLS_MODE" != "acme" ]]; then
+    SING_BOX_CERT_SHA256=$(openssl x509 -in "$TLS_CERT" -noout -fingerprint -sha256) || {
+      printf '读取 TLS 证书指纹失败。\n' >&2
+      return 1
+    }
+    SING_BOX_CERT_SHA256=${SING_BOX_CERT_SHA256#*=}
+  fi
   SING_NODE_PASSWORD=$(random_hex 16)
   SING_NODE_WARP_PASSWORD=""
   [[ "$WARP_MODE" == "both" ]] && SING_NODE_WARP_PASSWORD=$(random_hex 16)
@@ -1629,14 +1661,16 @@ manage_sing_box_nodes() {
       '请选择 sing-box 节点类型：' \
       '1) TUIC' \
       '2) AnyTLS' \
+      '3) Hysteria2' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2]：' choice
+    read -r -p '请输入 [0/1/2/3]：' choice
     case "$choice" in
       1) SING_NODE_TYPE="tuic"; setup_sing_box_node || true; pause_menu ;;
       2) SING_NODE_TYPE="anytls"; setup_sing_box_node || true; pause_menu ;;
+      3) SING_NODE_TYPE="hysteria2"; setup_sing_box_node || true; pause_menu ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
     esac
   done
 }

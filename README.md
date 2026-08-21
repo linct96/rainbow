@@ -48,7 +48,7 @@ Zone / DNS / Edit
 
 Token 保存在 `~/rainbow/acme/cf-token`，文件权限为 `0600`。`rainbow-acme.timer` 每天检查续期，只有证书发生变化时才会重启 sing-box。
 
-TUIC、AnyTLS 使用的 A、AAAA 或 CNAME 记录应在 Cloudflare 中设置为 `DNS only`。
+TUIC、AnyTLS、Hysteria2 使用的 A、AAAA 或 CNAME 记录应在 Cloudflare 中设置为 `DNS only`。
 
 查看续期日志：
 
