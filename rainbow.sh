@@ -543,6 +543,26 @@ read_ws_node_details() {
     }
   printf '完整节点域名：%s\n' "$NODE_SERVER_NAME"
 
+  command -v getent >/dev/null 2>&1 || {
+    printf '校验优选域名需要 getent 命令。\n' >&2
+    return 1
+  }
+  while true; do
+    read -r -p "请输入优选域名（直接回车使用 ${NODE_SERVER_NAME}）：" input
+    input=$(normalize_domain "$input")
+    NODE_ADDRESS=${input:-$NODE_SERVER_NAME}
+    if ! valid_domain "$NODE_ADDRESS"; then
+      printf '优选域名格式错误，请勿输入协议、路径或端口。\n' >&2
+    elif ! getent ahosts "$NODE_ADDRESS" >/dev/null 2>&1; then
+      printf '优选域名无法解析：%s\n' "$NODE_ADDRESS" >&2
+    else
+      break
+    fi
+  done
+  printf '%s\n' \
+    "客户端连接地址：$NODE_ADDRESS" \
+    "TLS SNI / WebSocket Host：$NODE_SERVER_NAME"
+
   read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
   NODE_PATH=${input:-/$(random_hex 4)}
   [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"

@@ -68,6 +68,8 @@ Xray 节点菜单支持创建 `VLESS + TLS + WebSocket + Cloudflare CDN` 节点�
 cdn.example.com
 ```
 
+随后可以输入优选域名；留空时使用上述完整节点域名。优选域名只作为客户端连接地址，TLS SNI 和 WebSocket Host 始终使用完整节点域名。
+
 可选端口仅限 Cloudflare 支持代理的 HTTPS 端口：
 
 ```text
