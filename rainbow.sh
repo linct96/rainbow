@@ -153,23 +153,21 @@ select_action() {
     '1) 搭建 X-ray 节点' \
     '2) 搭建 sing-box 节点' \
     '3) 查看所有节点' \
-    '4) 更新 rainbow' \
-    '5) 一键卸载' \
-    '6) 证书管理' \
-    '7) 一键初始化' \
+    '4) 一键卸载' \
+    '5) 证书管理' \
+    '6) 一键初始化' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6]：' choice
     case "$choice" in
       1) ACTION="xray-node"; return ;;
       2) ACTION="sing-box-node"; return ;;
       3) ACTION="show-nodes"; return ;;
-      4) ACTION="update"; return ;;
-      5) ACTION="uninstall"; return ;;
-      6) ACTION="tls"; return ;;
-      7) ACTION="initialize"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
+      4) ACTION="uninstall"; return ;;
+      5) ACTION="tls"; return ;;
+      6) ACTION="initialize"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5 或 6。\n' >&2 ;;
     esac
   done
 }
@@ -189,11 +187,6 @@ download() {
   local url=$1 output=$2
   curl --retry 3 -fL "$url" -o "$output" \
     || die "下载失败：${url}"
-}
-
-update_rainbow() {
-  download_rainbow
-  log "rainbow 已更新：${RAINBOW_BIN}"
 }
 
 uninstall_rainbow() {
@@ -1816,11 +1809,6 @@ main() {
 
     if [[ "$ACTION" == "uninstall" ]]; then
       uninstall_rainbow && exit
-      pause_menu
-      continue
-    fi
-    if [[ "$ACTION" == "update" ]]; then
-      update_rainbow
       pause_menu
       continue
     fi
