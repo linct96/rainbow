@@ -1377,11 +1377,6 @@ configure_acme_certificate() {
     return 1
   }
   printf '将申请包含 %s 和 *.%s 的证书。\n' "$domain" "$domain"
-  read -r -p "是否接受 Let's Encrypt 服务条款并继续 [y/N]：" answer
-  [[ "$answer" =~ ^[Yy]$ ]] || {
-    printf '已取消证书申请。\n'
-    return 1
-  }
 
   token_file="$TMP_DIR/cf-token"
   printf '%s' "$token" > "$token_file"
