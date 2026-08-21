@@ -5,6 +5,7 @@ set -Eeuo pipefail
 readonly SING_BOX_REPO="SagerNet/sing-box"
 readonly XRAY_REPO="XTLS/Xray-core"
 readonly WGCF_REPO="ViRb3/wgcf"
+readonly LEGO_REPO="go-acme/lego"
 readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
 readonly RAINBOW_BIN="/usr/local/bin/rb"
 readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
@@ -14,12 +15,25 @@ readonly WARP_HOME="$XRAY_HOME/warp"
 readonly WGCF_BIN="$WARP_HOME/wgcf"
 readonly WGCF_ACCOUNT="$WARP_HOME/wgcf-account.toml"
 readonly WGCF_PROFILE="$WARP_HOME/wgcf-profile.conf"
-readonly SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
-readonly SING_BOX_CERT="$SING_BOX_TLS_HOME/cert.pem"
-readonly SING_BOX_KEY="$SING_BOX_TLS_HOME/key.pem"
-readonly SING_BOX_TLS_SERVER_NAME="rainbow.local"
+readonly TLS_HOME="$RAINBOW_HOME/tls"
+readonly TLS_CERT="$TLS_HOME/cert.pem"
+readonly TLS_KEY="$TLS_HOME/key.pem"
+readonly TLS_DOMAIN_FILE="$TLS_HOME/domain"
+readonly TLS_MODE_FILE="$TLS_HOME/mode"
+readonly LEGACY_SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
+readonly ACME_HOME="$RAINBOW_HOME/acme"
+readonly ACME_BIN="$ACME_HOME/lego"
+readonly ACME_DATA_HOME="$ACME_HOME/data"
+readonly ACME_EMAIL_FILE="$ACME_HOME/email"
+readonly ACME_CF_TOKEN_FILE="$ACME_HOME/cf-token"
+readonly ACME_SERVICE="rainbow-acme"
+readonly ACME_TIMER="rainbow-acme.timer"
+readonly SELF_SIGNED_TLS_SERVER_NAME="rainbow.local"
 readonly SING_BOX_SERVICE="rainbow-sing-box"
 readonly XRAY_SERVICE="rainbow-xray"
+
+TLS_MODE="self-signed"
+SING_BOX_TLS_SERVER_NAME="$SELF_SIGNED_TLS_SERVER_NAME"
 
 log() {
   printf '[安装] %s\n' "$*"
@@ -114,10 +128,11 @@ select_action() {
     '5) 查看所有节点' \
     '6) 更新 rainbow' \
     '7) 一键卸载' \
+    '8) TLS 证书管理' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6/7/8]：' choice
     case "$choice" in
       1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
       2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
@@ -126,7 +141,8 @@ select_action() {
       5) ACTION="show-nodes"; return ;;
       6) ACTION="update"; return ;;
       7) ACTION="uninstall"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
+      8) ACTION="tls"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5、6、7 或 8。\n' >&2 ;;
     esac
   done
 }
@@ -164,7 +180,7 @@ update_rainbow() {
 }
 
 uninstall_rainbow() {
-  local answer service
+  local answer unit
 
   printf '%s\n' \
     '此操作将停止并删除 Rainbow 管理的 Xray、sing-box、节点配置和 rb 命令。' \
@@ -175,16 +191,18 @@ uninstall_rainbow() {
     return 1
   }
 
-  for service in "$XRAY_SERVICE" "$SING_BOX_SERVICE"; do
-    systemctl cat "$service" >/dev/null 2>&1 || continue
-    systemctl disable --now "$service" || {
-      printf '停止服务 %s 失败，卸载已中止。\n' "$service" >&2
+  for unit in "$ACME_TIMER" "$ACME_SERVICE" "$XRAY_SERVICE" "$SING_BOX_SERVICE"; do
+    systemctl cat "$unit" >/dev/null 2>&1 || continue
+    systemctl disable --now "$unit" || {
+      printf '停止服务 %s 失败，卸载已中止。\n' "$unit" >&2
       return 1
     }
   done
 
   rm -f "/etc/systemd/system/${XRAY_SERVICE}.service" \
-    "/etc/systemd/system/${SING_BOX_SERVICE}.service" || return
+    "/etc/systemd/system/${SING_BOX_SERVICE}.service" \
+    "/etc/systemd/system/${ACME_SERVICE}.service" \
+    "/etc/systemd/system/${ACME_TIMER}" || return
   systemctl daemon-reload || return
   rm -rf -- "$RAINBOW_HOME" || return
   rm -f -- "$RAINBOW_BIN" || return
@@ -917,6 +935,381 @@ manage_xray_nodes() {
   done
 }
 
+valid_domain() {
+  local domain=$1 label
+  local -a labels
+  [[ ${#domain} -le 253 && "$domain" == *.* ]] || return 1
+  IFS='.' read -r -a labels <<<"$domain"
+  for label in "${labels[@]}"; do
+    [[ ${#label} -ge 1 && ${#label} -le 63 \
+      && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+}
+
+valid_email() {
+  [[ $1 =~ ^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$ ]]
+}
+
+load_tls_settings() {
+  local domain mode
+  TLS_MODE="self-signed"
+  SING_BOX_TLS_SERVER_NAME="$SELF_SIGNED_TLS_SERVER_NAME"
+
+  [[ -s "$TLS_MODE_FILE" && -s "$TLS_DOMAIN_FILE" ]] || return 0
+  IFS= read -r mode < "$TLS_MODE_FILE"
+  IFS= read -r domain < "$TLS_DOMAIN_FILE"
+  if [[ "$mode" == "acme" ]] && valid_domain "$domain" \
+    && [[ -s "$TLS_CERT" && -s "$TLS_KEY" ]]; then
+    TLS_MODE="acme"
+    SING_BOX_TLS_SERVER_NAME="$domain"
+  fi
+}
+
+select_sing_box_tls_server_name() {
+  local domain prefix
+  load_tls_settings
+  [[ "$TLS_MODE" == "acme" ]] || return 0
+  domain=$SING_BOX_TLS_SERVER_NAME
+
+  if [[ "$NODE_ADDRESS" == "$domain" ]]; then
+    return
+  fi
+  if [[ "$NODE_ADDRESS" == *."$domain" ]]; then
+    prefix=${NODE_ADDRESS%."$domain"}
+    if [[ "$prefix" != *.* ]]; then
+      SING_BOX_TLS_SERVER_NAME=$NODE_ADDRESS
+    fi
+  fi
+  return 0
+}
+
+install_lego() {
+  local release_json tag version asset_name asset_url expected
+
+  [[ -x "$ACME_BIN" ]] && return
+  detect_arch
+  log "正在查询 lego 最新版本"
+  release_json=$(curl --retry 3 -fsSL \
+    "https://api.github.com/repos/${LEGO_REPO}/releases/latest") || return 1
+  tag=$(jq -r '.tag_name // empty' <<<"$release_json")
+  version=${tag#v}
+  asset_name="lego_v${version}_linux_${ARCH}.tar.gz"
+  asset_url=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")
+  expected=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .digest // empty' <<<"$release_json")
+  expected=${expected#sha256:}
+  [[ -n "$version" && -n "$asset_url" && "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+
+  download "$asset_url" "$TMP_DIR/$asset_name"
+  verify_sha256 "$TMP_DIR/$asset_name" "${expected,,}"
+  tar -xzf "$TMP_DIR/$asset_name" -C "$TMP_DIR" lego
+  install -d -m 0700 "$ACME_HOME" "$ACME_DATA_HOME"
+  install -m 0755 "$TMP_DIR/lego" "$ACME_BIN"
+  log "lego ${tag} 已安装"
+}
+
+run_lego() {
+  local domain=$1 email=$2 token_file=$3
+  CF_DNS_API_TOKEN_FILE="$token_file" "$ACME_BIN" run \
+    --accept-tos \
+    --server letsencrypt \
+    --email "$email" \
+    --dns cloudflare \
+    --domains "$domain" \
+    --domains "*.$domain" \
+    --path "$ACME_DATA_HOME"
+}
+
+validate_certificate_pair() {
+  local domain=$1 cert_file=$2 key_file=$3 cert_public_key key_public_key
+  openssl x509 -in "$cert_file" -noout -checkend 0 >/dev/null || return 1
+  openssl x509 -in "$cert_file" -noout -checkhost "$domain" >/dev/null || return 1
+  openssl x509 -in "$cert_file" -noout -checkhost "wildcard-check.$domain" \
+    >/dev/null || return 1
+  cert_public_key=$(openssl x509 -in "$cert_file" -pubkey -noout | sha256sum | awk '{print $1}')
+  key_public_key=$(openssl pkey -in "$key_file" -pubout 2>/dev/null \
+    | sha256sum | awk '{print $1}')
+  [[ -n "$cert_public_key" && "$cert_public_key" == "$key_public_key" ]]
+}
+
+write_sing_box_tls_paths() {
+  local current_config=$1 output_config=$2
+  jq \
+    --arg cert "$TLS_CERT" \
+    --arg key "$TLS_KEY" \
+    --arg legacy_cert "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
+    --arg legacy_key "$LEGACY_SING_BOX_TLS_HOME/key.pem" '
+      .inbounds = ((.inbounds // []) | map(
+        if ((.tag // "") == "rainbow-tuic")
+          or ((.tag // "") == "rainbow-anytls")
+          or (.tls.certificate_path? == $legacy_cert)
+          or (.tls.key_path? == $legacy_key)
+        then .tls.certificate_path = $cert | .tls.key_path = $key
+        else . end
+      ))
+    ' "$current_config" > "$output_config"
+}
+
+restore_tls_files() {
+  local had_cert=$1 had_key=$2 cert_backup=$3 key_backup=$4
+  if [[ "$had_cert" == "1" ]]; then
+    install -m 0644 "$cert_backup" "$TLS_CERT"
+  else
+    rm -f "$TLS_CERT"
+  fi
+  if [[ "$had_key" == "1" ]]; then
+    install -m 0600 "$key_backup" "$TLS_KEY"
+  else
+    rm -f "$TLS_KEY"
+  fi
+}
+
+deploy_acme_certificate() {
+  local domain=$1 source_cert source_key staged_cert staged_key config_file config_backup
+  local cert_backup="$TMP_DIR/tls-cert.backup" key_backup="$TMP_DIR/tls-key.backup"
+  local had_cert=0 had_key=0 has_sing_box=0
+  source_cert="$ACME_DATA_HOME/certificates/${domain}.crt"
+  source_key="$ACME_DATA_HOME/certificates/${domain}.key"
+  staged_cert="$TMP_DIR/tls-cert.pem"
+  staged_key="$TMP_DIR/tls-key.pem"
+  config_file="$TMP_DIR/sing-box-tls-config.json"
+  config_backup="$TMP_DIR/sing-box-config.backup"
+
+  [[ -s "$source_cert" && -s "$source_key" ]] || return 1
+  install -m 0644 "$source_cert" "$staged_cert"
+  install -m 0600 "$source_key" "$staged_key"
+  validate_certificate_pair "$domain" "$staged_cert" "$staged_key" || return 1
+
+  install -d -m 0700 "$TLS_HOME"
+  if [[ -f "$TLS_CERT" ]]; then
+    install -m 0644 "$TLS_CERT" "$cert_backup"
+    had_cert=1
+  fi
+  if [[ -f "$TLS_KEY" ]]; then
+    install -m 0600 "$TLS_KEY" "$key_backup"
+    had_key=1
+  fi
+  if ! install -m 0644 "$staged_cert" "$TLS_CERT" \
+    || ! install -m 0600 "$staged_key" "$TLS_KEY"; then
+    restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup"
+    return 1
+  fi
+
+  if [[ -x "$SING_BOX_HOME/sing-box" && -f "$SING_BOX_HOME/config.json" \
+    && -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" ]]; then
+    has_sing_box=1
+    install -m 0600 "$SING_BOX_HOME/config.json" "$config_backup"
+    if ! write_sing_box_tls_paths "$SING_BOX_HOME/config.json" "$config_file" \
+      || ! "$SING_BOX_HOME/sing-box" check -c "$config_file"; then
+      restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup"
+      return 1
+    fi
+    if ! install -m 0600 "$config_file" "$SING_BOX_HOME/config.json"; then
+      restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup"
+      return 1
+    fi
+  fi
+
+  if [[ "$has_sing_box" == "1" ]] && ! systemctl restart "$SING_BOX_SERVICE"; then
+    restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup"
+    install -m 0600 "$config_backup" "$SING_BOX_HOME/config.json"
+    systemctl restart "$SING_BOX_SERVICE" || true
+    return 1
+  fi
+}
+
+install_acme_timer() {
+  install -m 0644 /dev/null "/etc/systemd/system/${ACME_SERVICE}.service"
+  cat > "/etc/systemd/system/${ACME_SERVICE}.service" <<EOF
+[Unit]
+Description=Rainbow ACME certificate renewal
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$RAINBOW_BIN acme-renew
+EOF
+
+  install -m 0644 /dev/null "/etc/systemd/system/${ACME_TIMER}"
+  cat > "/etc/systemd/system/${ACME_TIMER}" <<EOF
+[Unit]
+Description=Daily Rainbow ACME certificate renewal check
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "$ACME_TIMER"
+}
+
+configure_acme_certificate() {
+  local domain email token answer current_domain=""
+  local token_file email_file domain_file mode_file command_name
+
+  for command_name in openssl tar; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+      printf '申请 ACME 证书需要 %s 命令。\n' "$command_name" >&2
+      return 1
+    }
+  done
+  while true; do
+    read -r -p '请输入根域名，例如 example.com：' domain
+    domain=${domain,,}
+    valid_domain "$domain" && break
+    printf '根域名格式错误。\n' >&2
+  done
+  if [[ -s "$TLS_DOMAIN_FILE" ]]; then
+    IFS= read -r current_domain < "$TLS_DOMAIN_FILE"
+  fi
+  if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
+    printf '当前证书域名为 %s，替换后已有客户端需要更新 SNI。\n' "$current_domain"
+    read -r -p '请输入 REPLACE 确认替换：' answer
+    [[ "$answer" == "REPLACE" ]] || {
+      printf '已取消证书替换。\n'
+      return 1
+    }
+  fi
+  while true; do
+    read -r -p '请输入 ACME 联系邮箱：' email
+    valid_email "$email" && break
+    printf '邮箱格式错误。\n' >&2
+  done
+  read -r -s -p '请输入 Cloudflare API Token：' token
+  printf '\n'
+  [[ -n "$token" ]] || {
+    printf 'Cloudflare API Token 不能为空。\n' >&2
+    return 1
+  }
+  printf '将申请包含 %s 和 *.%s 的证书。\n' "$domain" "$domain"
+  read -r -p "是否接受 Let's Encrypt 服务条款并继续 [y/N]：" answer
+  [[ "$answer" =~ ^[Yy]$ ]] || {
+    printf '已取消证书申请。\n'
+    return 1
+  }
+
+  token_file="$TMP_DIR/cf-token"
+  email_file="$TMP_DIR/acme-email"
+  domain_file="$TMP_DIR/acme-domain"
+  mode_file="$TMP_DIR/tls-mode"
+  printf '%s' "$token" > "$token_file"
+  printf '%s\n' "$email" > "$email_file"
+  printf '%s\n' "$domain" > "$domain_file"
+  printf '%s\n' 'acme' > "$mode_file"
+  chmod 0600 "$token_file" "$email_file" "$domain_file" "$mode_file"
+  unset token
+
+  install_lego || {
+    printf '安装 lego 失败。\n' >&2
+    return 1
+  }
+  run_lego "$domain" "$email" "$token_file" || {
+    printf 'ACME 证书签发失败，现有证书未修改。\n' >&2
+    return 1
+  }
+  deploy_acme_certificate "$domain" || {
+    printf '部署 ACME 证书失败，已保留原证书。\n' >&2
+    return 1
+  }
+
+  install -d -m 0700 "$ACME_HOME" "$TLS_HOME"
+  install -m 0600 "$token_file" "$ACME_CF_TOKEN_FILE"
+  install -m 0600 "$email_file" "$ACME_EMAIL_FILE"
+  install -m 0600 "$domain_file" "$TLS_DOMAIN_FILE"
+  install -m 0600 "$mode_file" "$TLS_MODE_FILE"
+  install_acme_timer || {
+    printf '证书已签发，但自动续期定时器安装失败。\n' >&2
+    return 1
+  }
+  log "ACME 证书已安装：$TLS_CERT"
+  if [[ -f "$SING_BOX_HOME/client-tuic.txt" || -f "$SING_BOX_HOME/client-anytls.txt" ]]; then
+    printf '已有客户端配置仍可连接，但请重新搭建节点以生成启用证书校验的新链接。\n'
+  fi
+}
+
+renew_acme_certificate() {
+  local domain email before_digest="" after_digest command_name
+  for command_name in openssl sha256sum; do
+    command -v "$command_name" >/dev/null 2>&1 || return 1
+  done
+  [[ -x "$ACME_BIN" && -s "$ACME_EMAIL_FILE" && -s "$ACME_CF_TOKEN_FILE" \
+    && -s "$TLS_DOMAIN_FILE" && -s "$TLS_MODE_FILE" ]] || return 1
+  IFS= read -r domain < "$TLS_DOMAIN_FILE"
+  IFS= read -r email < "$ACME_EMAIL_FILE"
+  valid_domain "$domain" && valid_email "$email" || return 1
+  [[ -f "$TLS_CERT" ]] && before_digest=$(sha256sum "$TLS_CERT" | awk '{print $1}')
+
+  run_lego "$domain" "$email" "$ACME_CF_TOKEN_FILE" || return 1
+  after_digest=$(sha256sum "$ACME_DATA_HOME/certificates/${domain}.crt" | awk '{print $1}')
+  if [[ -n "$before_digest" && "$before_digest" == "$after_digest" ]]; then
+    log 'ACME 证书暂不需要续期'
+    return
+  fi
+  deploy_acme_certificate "$domain" || return 1
+  log 'ACME 证书已续期并部署'
+}
+
+show_acme_certificate_status() {
+  local domain mode end_date end_epoch now_epoch remaining_days
+  if [[ ! -s "$TLS_MODE_FILE" ]]; then
+    printf '当前未配置 ACME 证书。\n'
+    return
+  fi
+  IFS= read -r mode < "$TLS_MODE_FILE"
+  [[ -s "$TLS_DOMAIN_FILE" ]] && IFS= read -r domain < "$TLS_DOMAIN_FILE" || domain="-"
+  printf '证书模式：%s\n根域名：%s\n证书路径：%s\n' "$mode" "$domain" "$TLS_CERT"
+  if [[ -s "$TLS_CERT" ]]; then
+    if command -v openssl >/dev/null 2>&1 \
+      && openssl x509 -in "$TLS_CERT" -noout -issuer -dates -ext subjectAltName; then
+      end_date=$(openssl x509 -in "$TLS_CERT" -noout -enddate | cut -d= -f2-)
+      end_epoch=$(date -d "$end_date" +%s 2>/dev/null || true)
+      now_epoch=$(date +%s)
+      if [[ "$end_epoch" =~ ^[0-9]+$ ]]; then
+        remaining_days=$(((end_epoch - now_epoch) / 86400))
+        printf '剩余天数：%s\n' "$remaining_days"
+      fi
+    else
+      printf '证书文件无效或缺少 openssl。\n' >&2
+    fi
+  else
+    printf '证书文件不存在。\n' >&2
+  fi
+  if systemctl is-enabled "$ACME_TIMER" >/dev/null 2>&1; then
+    printf '自动续期：已启用\n'
+  else
+    printf '自动续期：未启用\n'
+  fi
+}
+
+manage_tls_certificates() {
+  local choice
+  while true; do
+    clear_screen
+    show_header 'TLS 证书管理'
+    printf '%s\n' \
+      '1) 申请/重新配置 ACME 证书' \
+      '2) 查看证书状态' \
+      '3) 立即检查续期' \
+      '0) 返回' \
+      ''
+    read -r -p '请输入 [0/1/2/3]：' choice
+    case "$choice" in
+      1) configure_acme_certificate || true; pause_menu ;;
+      2) show_acme_certificate_status || true; pause_menu ;;
+      3) renew_acme_certificate || printf 'ACME 证书续期检查失败。\n' >&2; pause_menu ;;
+      0) return ;;
+      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+    esac
+  done
+}
+
 sing_box_version_at_least() {
   local major minor required_minor=$1 version
   version=$("$SING_BOX_HOME/sing-box" version | awk 'NR == 1 {print $3}')
@@ -936,17 +1329,34 @@ sing_box_supports_wireguard_endpoint() {
 
 ensure_sing_box_certificate() {
   local cert_file="$TMP_DIR/sing-box-cert.pem" key_file="$TMP_DIR/sing-box-key.pem"
+  local configured_mode=""
 
-  if [[ -f "$SING_BOX_CERT" && -f "$SING_BOX_KEY" ]]; then
+  [[ -s "$TLS_MODE_FILE" ]] && IFS= read -r configured_mode < "$TLS_MODE_FILE"
+  load_tls_settings
+  if [[ "$configured_mode" == "acme" ]]; then
+    [[ "$TLS_MODE" == "acme" ]] || {
+      printf 'ACME 证书配置不完整，请先在 TLS 证书管理中重新申请。\n' >&2
+      return 1
+    }
+    return
+  fi
+  if [[ -f "$TLS_CERT" && -f "$TLS_KEY" ]]; then
     return
   fi
 
-  install -d -m 0700 "$SING_BOX_TLS_HOME" || return 1
+  install -d -m 0700 "$TLS_HOME" || return 1
+  if [[ -f "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
+    && -f "$LEGACY_SING_BOX_TLS_HOME/key.pem" ]]; then
+    install -m 0644 "$LEGACY_SING_BOX_TLS_HOME/cert.pem" "$TLS_CERT" || return 1
+    install -m 0600 "$LEGACY_SING_BOX_TLS_HOME/key.pem" "$TLS_KEY" || return 1
+    log "已迁移 sing-box TLS 证书：$TLS_HOME"
+    return
+  fi
   openssl ecparam -name prime256v1 -genkey -noout -out "$key_file" || return 1
   openssl req -new -x509 -sha256 -days 3650 \
-    -key "$key_file" -out "$cert_file" -subj "/CN=${SING_BOX_TLS_SERVER_NAME}" || return 1
-  install -m 0644 "$cert_file" "$SING_BOX_CERT" || return 1
-  install -m 0600 "$key_file" "$SING_BOX_KEY" || return 1
+    -key "$key_file" -out "$cert_file" -subj "/CN=${SELF_SIGNED_TLS_SERVER_NAME}" || return 1
+  install -m 0644 "$cert_file" "$TLS_CERT" || return 1
+  install -m 0600 "$key_file" "$TLS_KEY" || return 1
   log "已生成 sing-box 自签名 TLS 证书"
 }
 
@@ -972,8 +1382,10 @@ write_sing_box_node_config() {
     --arg warp_uuid "${SING_NODE_WARP_UUID:-}" \
     --arg password "$SING_NODE_PASSWORD" \
     --arg warp_password "${SING_NODE_WARP_PASSWORD:-}" \
-    --arg certificate_path "$SING_BOX_CERT" \
-    --arg key_path "$SING_BOX_KEY" \
+    --arg certificate_path "$TLS_CERT" \
+    --arg key_path "$TLS_KEY" \
+    --arg legacy_certificate_path "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
+    --arg legacy_key_path "$LEGACY_SING_BOX_TLS_HOME/key.pem" \
     --arg warp_private_key "${WARP_PRIVATE_KEY:-}" \
     --arg warp_addresses "${WARP_ADDRESSES:-}" \
     --arg warp_public_key "${WARP_PUBLIC_KEY:-}" \
@@ -999,7 +1411,15 @@ write_sing_box_node_config() {
         end;
 
       .inbounds = (
-        ((.inbounds // []) | map(select((.tag // "") != $tag))) + [
+        ((.inbounds // []) | map(
+          if ((.tag // "") == "rainbow-tuic")
+            or ((.tag // "") == "rainbow-anytls")
+            or (.tls.certificate_path? == $legacy_certificate_path)
+            or (.tls.key_path? == $legacy_key_path)
+          then .tls.certificate_path = $certificate_path
+            | .tls.key_path = $key_path
+          else . end
+        ) | map(select((.tag // "") != $tag))) + [
           ({
             type: $type,
             tag: $tag,
@@ -1061,9 +1481,13 @@ write_sing_box_client_block() {
   local client_file=$1 uuid=$2 password=$3 label=$4 outbound=$5 uri
 
   if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
-    uri="tuic://${uuid}:${password}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&allow_insecure=1&udp_relay_mode=native#${label}"
+    uri="tuic://${uuid}:${password}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&udp_relay_mode=native"
+    [[ "$TLS_MODE" == "acme" ]] || uri+="&allow_insecure=1"
+    uri+="#${label}"
   else
-    uri="anytls://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}&insecure=1#${label}"
+    uri="anytls://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}"
+    [[ "$TLS_MODE" == "acme" ]] || uri+="&insecure=1"
+    uri+="#${label}"
   fi
 
   printf '%s\n' \
@@ -1163,6 +1587,7 @@ setup_sing_box_node() {
     printf '生成 sing-box TLS 证书失败。\n' >&2
     return 1
   }
+  select_sing_box_tls_server_name
   SING_NODE_PASSWORD=$(random_hex 16)
   SING_NODE_WARP_PASSWORD=""
   [[ "$WARP_MODE" == "both" ]] && SING_NODE_WARP_PASSWORD=$(random_hex 16)
@@ -1223,13 +1648,16 @@ manage_sing_box_nodes() {
   done
 }
 
-main() {
-  require_root
-  require_commands
-
+init_temp_dir() {
   TMP_DIR=$(mktemp -d)
   readonly TMP_DIR
   trap 'rm -rf "$TMP_DIR"' EXIT
+}
+
+main() {
+  require_root
+  require_commands
+  init_temp_dir
 
   install_rainbow_command
 
@@ -1261,6 +1689,10 @@ main() {
       manage_sing_box_nodes
       continue
     fi
+    if [[ "$ACTION" == "tls" ]]; then
+      manage_tls_certificates
+      continue
+    fi
 
     detect_arch
     read_version
@@ -1275,6 +1707,18 @@ main() {
   done
 }
 
+run_command() {
+  case "${1:-}" in
+    acme-renew)
+      require_root
+      require_commands
+      init_temp_dir
+      renew_acme_certificate
+      ;;
+    *) main ;;
+  esac
+}
+
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-  main "$@"
+  run_command "$@"
 fi
