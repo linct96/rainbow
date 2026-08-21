@@ -21,6 +21,22 @@ die() {
   exit 1
 }
 
+clear_screen() {
+  if [[ -t 1 ]]; then
+    printf '\033[2J\033[H'
+  fi
+}
+
+show_header() {
+  printf 'Rainbow - %s\n\n' "$1"
+}
+
+pause_menu() {
+  [[ -t 0 ]] || return 0
+  printf '\n'
+  read -r -p '按 Enter 键返回菜单...' _
+}
+
 require_root() {
   [[ ${EUID} -eq 0 ]] || die "请使用 root 用户运行：sudo bash $0"
 }
@@ -85,7 +101,8 @@ select_action() {
     '1) sing-box' \
     '2) Xray' \
     '3) 搭建 X-ray 节点' \
-    '4) 更新 rainbow'
+    '4) 更新 rainbow' \
+    ''
 
   while true; do
     read -r -p '请输入 [1/2/3/4]：' choice
@@ -521,15 +538,18 @@ manage_xray_nodes() {
   local choice
 
   while true; do
+    clear_screen
+    show_header 'X-ray 节点'
     printf '%s\n' \
       '请选择 X-ray 节点类型：' \
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
-      '0) 返回'
+      '0) 返回' \
+      ''
     read -r -p '请输入 [0/1/2]：' choice
     case "$choice" in
-      1) NODE_TYPE="xhttp"; setup_xray_node || true ;;
-      2) NODE_TYPE="tcp"; setup_xray_node || true ;;
+      1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
+      2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
       0) return ;;
       *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
     esac
@@ -547,11 +567,14 @@ main() {
   install_rainbow_command
 
   while true; do
+    clear_screen
+    show_header '主菜单'
     show_installation_status
     select_action
 
     if [[ "$ACTION" == "update" ]]; then
       update_rainbow
+      pause_menu
       continue
     fi
     if [[ "$ACTION" == "node" ]]; then
@@ -568,6 +591,7 @@ main() {
     esac
 
     log "${PRODUCT} ${VERSION} 安装完成"
+    pause_menu
   done
 }
 
