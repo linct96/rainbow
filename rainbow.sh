@@ -384,7 +384,7 @@ read_node_details() {
   fi
 }
 
-select_xray_warp_mode() {
+select_warp_mode() {
   local choice
 
   printf '%s\n' \
@@ -475,6 +475,16 @@ detect_warp_domain_strategy() {
   if ip -4 route show default | grep -q . && ! ip -6 route show default | grep -q .; then
     WARP_DOMAIN_STRATEGY="ForceIPv4"
   fi
+}
+
+resolve_warp_endpoint() {
+  WARP_ENDPOINT_ADDRESS=${WARP_ENDPOINT%:*}
+  WARP_ENDPOINT_PORT=${WARP_ENDPOINT##*:}
+  if [[ "$WARP_DOMAIN_STRATEGY" == "ForceIPv4" ]]; then
+    WARP_ENDPOINT_ADDRESS=$(getent ahostsv4 "$WARP_ENDPOINT_ADDRESS" \
+      | awk 'NR == 1 {print $1}')
+  fi
+  [[ -n "$WARP_ENDPOINT_ADDRESS" && "$WARP_ENDPOINT_PORT" =~ ^[0-9]+$ ]]
 }
 
 ensure_warp_profile() {
@@ -745,7 +755,7 @@ setup_xray_node() {
     return 1
   }
 
-  select_xray_warp_mode
+  select_warp_mode
   if [[ "$WARP_MODE" != "direct" ]]; then
     ensure_warp_profile || {
       printf 'WARP 配置失败，原配置未修改。\n' >&2
@@ -830,13 +840,21 @@ manage_xray_nodes() {
   done
 }
 
-sing_box_supports_anytls() {
-  local major minor version
+sing_box_version_at_least() {
+  local major minor required_minor=$1 version
   version=$("$SING_BOX_HOME/sing-box" version | awk 'NR == 1 {print $3}')
   [[ "$version" =~ ^([0-9]+)[.]([0-9]+) ]] || return 1
   major=${BASH_REMATCH[1]}
   minor=${BASH_REMATCH[2]}
-  ((major > 1 || (major == 1 && minor >= 12)))
+  ((major > 1 || (major == 1 && minor >= required_minor)))
+}
+
+sing_box_supports_anytls() {
+  sing_box_version_at_least 12
+}
+
+sing_box_supports_wireguard_endpoint() {
+  sing_box_version_at_least 11
 }
 
 ensure_sing_box_certificate() {
@@ -864,15 +882,45 @@ read_sing_box_node_details() {
 
 write_sing_box_node_config() {
   local current_config=$1 config_file=$2 tag="rainbow-${SING_NODE_TYPE}"
+  local direct_user="rainbow-${SING_NODE_TYPE}" warp_user="rainbow-${SING_NODE_TYPE}-warp"
 
   jq \
     --arg type "$SING_NODE_TYPE" \
     --arg tag "$tag" \
+    --arg direct_user "$direct_user" \
+    --arg warp_user "$warp_user" \
+    --arg warp_mode "$WARP_MODE" \
     --argjson port "$NODE_PORT" \
     --arg uuid "${SING_NODE_UUID:-}" \
+    --arg warp_uuid "${SING_NODE_WARP_UUID:-}" \
     --arg password "$SING_NODE_PASSWORD" \
+    --arg warp_password "${SING_NODE_WARP_PASSWORD:-}" \
     --arg certificate_path "$SING_BOX_CERT" \
-    --arg key_path "$SING_BOX_KEY" '
+    --arg key_path "$SING_BOX_KEY" \
+    --arg warp_private_key "${WARP_PRIVATE_KEY:-}" \
+    --arg warp_addresses "${WARP_ADDRESSES:-}" \
+    --arg warp_public_key "${WARP_PUBLIC_KEY:-}" \
+    --arg warp_allowed_ips "${WARP_ALLOWED_IPS:-}" \
+    --arg warp_endpoint_address "${WARP_ENDPOINT_ADDRESS:-}" \
+    --argjson warp_endpoint_port "${WARP_ENDPOINT_PORT:-0}" \
+    --argjson warp_mtu "${WARP_MTU:-1280}" '
+      def csv:
+        split(",") | map(gsub("^[ \t]+|[ \t]+$"; "")) | map(select(length > 0));
+
+      def user($name; $uuid; $password):
+        {name: $name, password: $password}
+        + if $type == "tuic" then {uuid: $uuid} else {} end;
+
+      def node_users:
+        if $warp_mode == "direct" then
+          [user($direct_user; $uuid; $password)]
+        elif $warp_mode == "both" then
+          [user($direct_user; $uuid; $password),
+            user($warp_user; $warp_uuid; $warp_password)]
+        else
+          [user($warp_user; $uuid; $password)]
+        end;
+
       .inbounds = (
         ((.inbounds // []) | map(select((.tag // "") != $tag))) + [
           ({
@@ -880,14 +928,7 @@ write_sing_box_node_config() {
             tag: $tag,
             listen: "0.0.0.0",
             listen_port: $port,
-            users: (if $type == "tuic" then [{
-              name: "rainbow",
-              uuid: $uuid,
-              password: $password
-            }] else [{
-              name: "rainbow",
-              password: $password
-            }] end),
+            users: node_users,
             tls: ({
               enabled: true,
               certificate_path: $certificate_path,
@@ -899,30 +940,89 @@ write_sing_box_node_config() {
           } else {} end)
         ]
       )
+      | .route = (
+          (.route // {})
+          | .rules = (
+              (if $warp_mode == "direct" then [] else [{
+                  auth_user: [$warp_user],
+                  action: "route",
+                  outbound: "rainbow-warp"
+                }] end)
+              + ((.rules // []) | map(select(
+                  (((.outbound // "") == "rainbow-warp")
+                    and ((.auth_user // []) | index($warp_user) != null)) | not
+                )))
+            )
+        )
+      | ([.route.rules[]? | select((.outbound // "") == "rainbow-warp")] | length > 0)
+        as $needs_warp
+      | .endpoints = (
+          if $warp_mode == "direct" then
+            if $needs_warp then (.endpoints // [])
+            else ((.endpoints // []) | map(select((.tag // "") != "rainbow-warp"))) end
+          else
+            ((.endpoints // []) | map(select((.tag // "") != "rainbow-warp"))) + [{
+              type: "wireguard",
+              tag: "rainbow-warp",
+              system: false,
+              mtu: $warp_mtu,
+              address: ($warp_addresses | csv),
+              private_key: $warp_private_key,
+              peers: [{
+                address: $warp_endpoint_address,
+                port: $warp_endpoint_port,
+                public_key: $warp_public_key,
+                allowed_ips: ($warp_allowed_ips | csv)
+              }]
+            }]
+          end
+        )
     ' "$current_config" > "$config_file"
+}
+
+write_sing_box_client_block() {
+  local client_file=$1 uuid=$2 password=$3 label=$4 outbound=$5 uri
+
+  if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
+    uri="tuic://${uuid}:${password}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&allow_insecure=1&udp_relay_mode=native#${label}"
+  else
+    uri="anytls://${password}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}&insecure=1#${label}"
+  fi
+
+  printf '%s\n' \
+    "类型：$label" \
+    "出站：$outbound" \
+    "地址：$NODE_ADDRESS" \
+    "端口：$NODE_PORT" \
+    "TLS SNI：$SING_BOX_TLS_SERVER_NAME" \
+    "UUID：${uuid:--}" \
+    "密码：$password" \
+    "分享链接：$uri" >> "$client_file"
 }
 
 save_sing_box_client_info() {
   local all_clients="$SING_BOX_HOME/client.txt"
-  local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label uri
+  local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label
 
-  if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
-    label="Rainbow-TUIC"
-    uri="tuic://${SING_NODE_UUID}:${SING_NODE_PASSWORD}@${NODE_ADDRESS}:${NODE_PORT}?congestion_control=bbr&alpn=h3&sni=${SING_BOX_TLS_SERVER_NAME}&allow_insecure=1&udp_relay_mode=native#${label}"
-  else
-    label="Rainbow-AnyTLS"
-    uri="anytls://${SING_NODE_PASSWORD}@${NODE_ADDRESS}:${NODE_PORT}/?sni=${SING_BOX_TLS_SERVER_NAME}&insecure=1#${label}"
-  fi
-
+  [[ "$SING_NODE_TYPE" == "tuic" ]] && label="Rainbow-TUIC" || label="Rainbow-AnyTLS"
   install -m 0600 /dev/null "$client_file"
-  printf '%s\n' \
-    "类型：$label" \
-    "地址：$NODE_ADDRESS" \
-    "端口：$NODE_PORT" \
-    "TLS SNI：$SING_BOX_TLS_SERVER_NAME" \
-    "UUID：${SING_NODE_UUID:--}" \
-    "密码：$SING_NODE_PASSWORD" \
-    "分享链接：$uri" > "$client_file"
+  case "$WARP_MODE" in
+    direct)
+      write_sing_box_client_block "$client_file" "$SING_NODE_UUID" \
+        "$SING_NODE_PASSWORD" "$label" "直出"
+      ;;
+    both)
+      write_sing_box_client_block "$client_file" "$SING_NODE_UUID" \
+        "$SING_NODE_PASSWORD" "$label" "直出"
+      printf '\n' >> "$client_file"
+      write_sing_box_client_block "$client_file" "$SING_NODE_WARP_UUID" \
+        "$SING_NODE_WARP_PASSWORD" "${label}-WARP" "WARP"
+      ;;
+    warp)
+      write_sing_box_client_block "$client_file" "$SING_NODE_UUID" \
+        "$SING_NODE_PASSWORD" "${label}-WARP" "WARP"
+      ;;
+  esac
 
   install -m 0600 /dev/null "$all_clients"
   for type in tuic anytls; do
@@ -959,6 +1059,26 @@ setup_sing_box_node() {
     printf 'AnyTLS 需要 sing-box 1.12.0 或更高版本。\n' >&2
     return 1
   fi
+  select_warp_mode
+  if [[ "$WARP_MODE" != "direct" ]]; then
+    if ! sing_box_supports_wireguard_endpoint; then
+      printf 'WARP 需要 sing-box 1.11.0 或更高版本。\n' >&2
+      return 1
+    fi
+    command -v getent >/dev/null 2>&1 || {
+      printf '搭建 sing-box WARP 节点需要 getent 命令。\n' >&2
+      return 1
+    }
+    ensure_warp_profile || {
+      printf 'WARP 配置失败，原配置未修改。\n' >&2
+      return 1
+    }
+    detect_warp_domain_strategy
+    resolve_warp_endpoint || {
+      printf 'WARP Endpoint 解析失败，原配置未修改。\n' >&2
+      return 1
+    }
+  fi
 
   read_sing_box_node_details || return
   ensure_sing_box_certificate || {
@@ -966,12 +1086,21 @@ setup_sing_box_node() {
     return 1
   }
   SING_NODE_PASSWORD=$(random_hex 16)
+  SING_NODE_WARP_PASSWORD=""
+  [[ "$WARP_MODE" == "both" ]] && SING_NODE_WARP_PASSWORD=$(random_hex 16)
   SING_NODE_UUID=""
+  SING_NODE_WARP_UUID=""
   if [[ "$SING_NODE_TYPE" == "tuic" ]]; then
     SING_NODE_UUID=$("$SING_BOX_HOME/sing-box" generate uuid) || {
       printf '生成 TUIC UUID 失败。\n' >&2
       return 1
     }
+    if [[ "$WARP_MODE" == "both" ]]; then
+      SING_NODE_WARP_UUID=$("$SING_BOX_HOME/sing-box" generate uuid) || {
+        printf '生成 TUIC WARP UUID 失败。\n' >&2
+        return 1
+      }
+    fi
   fi
 
   write_sing_box_node_config "$SING_BOX_HOME/config.json" "$config_file"
