@@ -4,11 +4,16 @@ set -Eeuo pipefail
 
 readonly SING_BOX_REPO="SagerNet/sing-box"
 readonly XRAY_REPO="XTLS/Xray-core"
+readonly WGCF_REPO="ViRb3/wgcf"
 readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
 readonly RAINBOW_BIN="/usr/local/bin/rb"
 readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
 readonly SING_BOX_HOME="$RAINBOW_HOME/sing-box"
 readonly XRAY_HOME="$RAINBOW_HOME/xray"
+readonly WARP_HOME="$XRAY_HOME/warp"
+readonly WGCF_BIN="$WARP_HOME/wgcf"
+readonly WGCF_ACCOUNT="$WARP_HOME/wgcf-account.toml"
+readonly WGCF_PROFILE="$WARP_HOME/wgcf-profile.conf"
 readonly SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
 readonly SING_BOX_CERT="$SING_BOX_TLS_HOME/cert.pem"
 readonly SING_BOX_KEY="$SING_BOX_TLS_HOME/key.pem"
@@ -377,10 +382,131 @@ read_node_details() {
   fi
 }
 
+select_xray_warp_mode() {
+  local choice
+
+  printf '%s\n' \
+    '' \
+    '请选择该节点的 WARP 出站模式：' \
+    '1) 不启用 WARP（默认）' \
+    '2) 同时创建直出和 WARP 节点' \
+    '3) 仅创建 WARP 节点' \
+    ''
+  while true; do
+    read -r -p '请输入 [1/2/3]（直接回车选择 1）：' choice
+    case "${choice:-1}" in
+      1) WARP_MODE="direct"; return ;;
+      2) WARP_MODE="both"; return ;;
+      3) WARP_MODE="warp"; return ;;
+      *) printf '无效选项，请输入 1、2 或 3。\n' >&2 ;;
+    esac
+  done
+}
+
+install_wgcf() {
+  local release_json tag version asset_name asset_url expected actual
+
+  detect_arch
+  log "正在查询 wgcf 最新版本"
+  release_json=$(curl --retry 3 -fsSL "https://api.github.com/repos/${WGCF_REPO}/releases/latest") || {
+    printf '查询 wgcf 最新版本失败。\n' >&2
+    return 1
+  }
+  tag=$(jq -r '.tag_name // empty' <<<"$release_json")
+  version=${tag#v}
+  asset_name="wgcf_${version}_linux_${ARCH}"
+  asset_url=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")
+  expected=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .digest // empty' <<<"$release_json")
+  expected=${expected#sha256:}
+  [[ -n "$version" && -n "$asset_url" ]] || {
+    printf '未找到适用于当前架构的 wgcf 安装包。\n' >&2
+    return 1
+  }
+
+  curl --retry 3 -fL "$asset_url" -o "$TMP_DIR/$asset_name" || {
+    printf '下载 wgcf 失败。\n' >&2
+    return 1
+  }
+  actual=$(sha256sum "$TMP_DIR/$asset_name" | awk '{print $1}')
+  [[ "$expected" =~ ^[0-9a-fA-F]{64}$ && "$actual" == "$expected" ]] || {
+    printf 'wgcf SHA-256 校验失败。\n' >&2
+    return 1
+  }
+
+  install -d -m 0700 "$WARP_HOME"
+  install -m 0755 "$TMP_DIR/$asset_name" "$WGCF_BIN"
+  log "wgcf ${tag} 已安装"
+}
+
+read_wgcf_profile_value() {
+  local key=$1
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[^=]*=[[:space:]]*", "")
+      sub("[[:space:]]*$", "")
+      gsub("\\r", "")
+      print
+      exit
+    }
+  ' "$WGCF_PROFILE"
+}
+
+load_wgcf_profile() {
+  [[ -s "$WGCF_PROFILE" ]] || return 1
+
+  WARP_PRIVATE_KEY=$(read_wgcf_profile_value PrivateKey)
+  WARP_ADDRESSES=$(read_wgcf_profile_value Address)
+  WARP_PUBLIC_KEY=$(read_wgcf_profile_value PublicKey)
+  WARP_ALLOWED_IPS=$(read_wgcf_profile_value AllowedIPs)
+  WARP_ENDPOINT=$(read_wgcf_profile_value Endpoint)
+  WARP_MTU=$(read_wgcf_profile_value MTU)
+  WARP_MTU=${WARP_MTU:-1280}
+  [[ -n "$WARP_PRIVATE_KEY" && -n "$WARP_ADDRESSES" && -n "$WARP_PUBLIC_KEY" \
+    && -n "$WARP_ENDPOINT" && "$WARP_MTU" =~ ^[0-9]+$ ]] || return 1
+  WARP_ALLOWED_IPS=${WARP_ALLOWED_IPS:-0.0.0.0/0, ::/0}
+}
+
+ensure_warp_profile() {
+  local answer
+
+  load_wgcf_profile && return
+  install -d -m 0700 "$WARP_HOME"
+  [[ -x "$WGCF_BIN" ]] || install_wgcf || return
+
+  if [[ ! -s "$WGCF_ACCOUNT" ]]; then
+    printf '%s\n' \
+      '首次启用 WARP 需要通过 wgcf 注册 Cloudflare WARP 账户。' \
+      '服务条款：https://www.cloudflare.com/application/terms/'
+    read -r -p '是否同意并继续 [y/N]：' answer
+    [[ "$answer" =~ ^[Yy]$ ]] || {
+      printf '已取消 WARP 配置。\n' >&2
+      return 1
+    }
+    "$WGCF_BIN" register --accept-tos --config "$WGCF_ACCOUNT" || {
+      [[ -s "$WGCF_ACCOUNT" ]] || return 1
+      log "wgcf 已生成账户，继续验证配置"
+    }
+    chmod 0600 "$WGCF_ACCOUNT"
+  fi
+
+  "$WGCF_BIN" generate --config "$WGCF_ACCOUNT" --profile "$WGCF_PROFILE" || return
+  chmod 0600 "$WGCF_PROFILE"
+  load_wgcf_profile || {
+    printf 'wgcf 生成的 WireGuard 配置不完整。\n' >&2
+    return 1
+  }
+}
+
 generate_xray_credentials() {
   local key_output
 
   NODE_UUID=$("$XRAY_HOME/xray" uuid)
+  NODE_WARP_UUID=""
+  if [[ "$WARP_MODE" == "both" ]]; then
+    NODE_WARP_UUID=$("$XRAY_HOME/xray" uuid)
+  fi
   key_output=$("$XRAY_HOME/xray" x25519)
   NODE_PRIVATE_KEY=$(awk -F ': *' 'tolower($1) ~ /^private[[:space:]]*key$/ {print $2; exit}' \
     <<<"$key_output")
@@ -388,12 +514,13 @@ generate_xray_credentials() {
     'tolower($1) ~ /^(password|public[[:space:]]*key)/ {print $2; exit}' <<<"$key_output")
   NODE_SHORT_ID=$(random_hex 8)
 
-  [[ "$NODE_UUID" =~ ^[0-9a-fA-F-]{36}$ && -n "$NODE_PRIVATE_KEY" && -n "$NODE_PUBLIC_KEY" ]] \
-    || return 1
+  [[ "$NODE_UUID" =~ ^[0-9a-fA-F-]{36}$ && -n "$NODE_PRIVATE_KEY" \
+    && -n "$NODE_PUBLIC_KEY" ]] || return 1
+  [[ -z "$NODE_WARP_UUID" || "$NODE_WARP_UUID" =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
 }
 
 write_xray_node_config() {
-  local current_config=$1 config_file=$2 flow network tag
+  local current_config=$1 config_file=$2 flow network tag warp_email
 
   if [[ "$NODE_TYPE" == "xhttp" ]]; then
     network="xhttp"
@@ -403,18 +530,31 @@ write_xray_node_config() {
     flow="xtls-rprx-vision"
   fi
   tag="rainbow-vless-${NODE_TYPE}"
+  warp_email="rainbow-${NODE_TYPE}-warp"
 
   jq \
     --argjson port "$NODE_PORT" \
     --arg uuid "$NODE_UUID" \
+    --arg warp_uuid "$NODE_WARP_UUID" \
+    --arg warp_mode "$WARP_MODE" \
     --arg flow "$flow" \
     --arg network "$network" \
     --arg tag "$tag" \
+    --arg warp_email "$warp_email" \
     --arg path "$NODE_PATH" \
     --arg target "${NODE_SERVER_NAME}:443" \
     --arg server_name "$NODE_SERVER_NAME" \
     --arg private_key "$NODE_PRIVATE_KEY" \
-    --arg short_id "$NODE_SHORT_ID" '
+    --arg short_id "$NODE_SHORT_ID" \
+    --arg warp_private_key "${WARP_PRIVATE_KEY:-}" \
+    --arg warp_addresses "${WARP_ADDRESSES:-}" \
+    --arg warp_public_key "${WARP_PUBLIC_KEY:-}" \
+    --arg warp_allowed_ips "${WARP_ALLOWED_IPS:-}" \
+    --arg warp_endpoint "${WARP_ENDPOINT:-}" \
+    --argjson warp_mtu "${WARP_MTU:-1280}" '
+      def csv:
+        split(",") | map(gsub("^[ \t]+|[ \t]+$"; "")) | map(select(length > 0));
+
       def same_node_type:
         ((.tag // "") == $tag) or
         (
@@ -429,6 +569,21 @@ write_xray_node_config() {
           end)
         );
 
+      def direct_client:
+        {id: $uuid, flow: $flow};
+
+      def warp_client($id):
+        {id: $id, flow: $flow, email: $warp_email};
+
+      def node_clients:
+        if $warp_mode == "direct" then
+          [direct_client]
+        elif $warp_mode == "both" then
+          [direct_client, warp_client($warp_uuid)]
+        else
+          [warp_client($uuid)]
+        end;
+
       .inbounds = (
         ((.inbounds // []) | map(select(same_node_type | not))) + [{
           tag: $tag,
@@ -436,7 +591,7 @@ write_xray_node_config() {
           port: $port,
           protocol: "vless",
           settings: {
-            clients: [{id: $uuid, flow: $flow}],
+            clients: node_clients,
             decryption: "none"
           },
           streamSettings: ({
@@ -459,11 +614,71 @@ write_xray_node_config() {
           }
         }]
       )
+      | .routing = (
+          (.routing // {})
+          | .rules = (
+              (if $warp_mode == "direct" then [] else [{
+                  type: "field",
+                  user: [$warp_email],
+                  outboundTag: "rainbow-warp"
+                }] end)
+              + ((.rules // []) | map(select(
+                  (((.outboundTag // "") == "rainbow-warp")
+                    and ((.user // []) | index($warp_email) != null)) | not
+                )))
+            )
+        )
+      | ([.routing.rules[]? | select((.outboundTag // "") == "rainbow-warp")] | length > 0)
+        as $needs_warp
+      | .outbounds = (
+          if $warp_mode == "direct" then
+            if $needs_warp then (.outbounds // [])
+            else ((.outbounds // []) | map(select((.tag // "") != "rainbow-warp"))) end
+          else
+            ((.outbounds // []) | map(select((.tag // "") != "rainbow-warp"))) + [{
+              tag: "rainbow-warp",
+              protocol: "wireguard",
+              settings: {
+                secretKey: $warp_private_key,
+                address: ($warp_addresses | csv),
+                peers: [{
+                  endpoint: $warp_endpoint,
+                  publicKey: $warp_public_key,
+                  allowedIPs: ($warp_allowed_ips | csv)
+                }],
+                mtu: $warp_mtu
+              }
+            }]
+          end
+        )
     ' "$current_config" > "$config_file"
 }
 
+write_xray_client_block() {
+  local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_path uri
+
+  if [[ "$NODE_TYPE" == "xhttp" ]]; then
+    encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
+    uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${label}"
+  else
+    uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
+  fi
+
+  printf '%s\n' \
+    "类型：$label" \
+    "出站：$outbound" \
+    "地址：$NODE_ADDRESS" \
+    "端口：$NODE_PORT" \
+    "伪装域名：$NODE_SERVER_NAME" \
+    "XHTTP 路径：${NODE_PATH:--}" \
+    "UUID：$uuid" \
+    "Public Key：$NODE_PUBLIC_KEY" \
+    "Short ID：$NODE_SHORT_ID" \
+    "分享链接：$uri" >> "$client_file"
+}
+
 save_xray_client_info() {
-  local all_clients="$XRAY_HOME/client.txt" client_file encoded_path first_line label uri
+  local all_clients="$XRAY_HOME/client.txt" client_file first_line label
 
   if [[ -f "$all_clients" && ! -f "$XRAY_HOME/client-xhttp.txt" \
     && ! -f "$XRAY_HOME/client-tcp.txt" ]]; then
@@ -474,27 +689,23 @@ save_xray_client_info() {
     esac
   fi
 
-  if [[ "$NODE_TYPE" == "xhttp" ]]; then
-    encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-    label="Rainbow-XHTTP"
-    uri="vless://${NODE_UUID}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${label}"
-  else
-    label="Rainbow-TCP"
-    uri="vless://${NODE_UUID}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
-  fi
+  [[ "$NODE_TYPE" == "xhttp" ]] && label="Rainbow-XHTTP" || label="Rainbow-TCP"
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
   install -m 0600 /dev/null "$client_file"
-  printf '%s\n' \
-    "类型：$label" \
-    "地址：$NODE_ADDRESS" \
-    "端口：$NODE_PORT" \
-    "伪装域名：$NODE_SERVER_NAME" \
-    "XHTTP 路径：${NODE_PATH:--}" \
-    "UUID：$NODE_UUID" \
-    "Public Key：$NODE_PUBLIC_KEY" \
-    "Short ID：$NODE_SHORT_ID" \
-    "分享链接：$uri" > "$client_file"
+  case "$WARP_MODE" in
+    direct)
+      write_xray_client_block "$client_file" "$NODE_UUID" "$label" "直出"
+      ;;
+    both)
+      write_xray_client_block "$client_file" "$NODE_UUID" "$label" "直出"
+      printf '\n' >> "$client_file"
+      write_xray_client_block "$client_file" "$NODE_WARP_UUID" "${label}-WARP" "WARP"
+      ;;
+    warp)
+      write_xray_client_block "$client_file" "$NODE_UUID" "${label}-WARP" "WARP"
+      ;;
+  esac
 
   install -m 0600 /dev/null "$all_clients"
   for type in xhttp tcp; do
@@ -523,6 +734,13 @@ setup_xray_node() {
     return 1
   }
 
+  select_xray_warp_mode
+  if [[ "$WARP_MODE" != "direct" ]]; then
+    ensure_warp_profile || {
+      printf 'WARP 配置失败，原配置未修改。\n' >&2
+      return 1
+    }
+  fi
   read_node_details || return
   generate_xray_credentials || {
     printf '生成 Xray 凭据失败。\n' >&2
