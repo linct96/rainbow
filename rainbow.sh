@@ -111,18 +111,20 @@ select_action() {
     '2) Xray' \
     '3) 搭建 X-ray 节点' \
     '4) 搭建 sing-box 节点' \
-    '5) 更新 rainbow' \
+    '5) 查看所有节点' \
+    '6) 更新 rainbow' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6]：' choice
     case "$choice" in
       1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
       2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
       3) ACTION="xray-node"; return ;;
       4) ACTION="sing-box-node"; return ;;
-      5) ACTION="update"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4 或 5。\n' >&2 ;;
+      5) ACTION="show-nodes"; return ;;
+      6) ACTION="update"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5 或 6。\n' >&2 ;;
     esac
   done
 }
@@ -766,16 +768,15 @@ setup_xray_node() {
   save_xray_client_info
 }
 
-show_enabled_nodes() {
+show_nodes() {
   local client_file=$2 service=$1 service_name=$3
 
-  clear_screen
-  show_header '已启用节点'
+  printf '%s：\n' "$service_name"
 
   if ! systemctl is-active --quiet "$service"; then
-    printf '%s 服务未运行，暂无已启用节点。\n' "$service_name"
+    printf '  服务未运行，暂无已启用节点。\n'
   elif [[ ! -s "$client_file" ]] || ! grep -q '^分享链接：' "$client_file"; then
-    printf '暂无可展示的节点信息。\n'
+    printf '  暂无可展示的节点信息。\n'
   else
     awk '
       /^分享链接：/ {
@@ -785,12 +786,16 @@ show_enabled_nodes() {
       }
     ' "$client_file"
   fi
-
-  pause_menu
 }
 
-show_enabled_xray_nodes() {
-  show_enabled_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
+show_all_nodes() {
+  clear_screen
+  show_header '所有节点'
+
+  show_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
+  printf '\n'
+  show_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box'
+  pause_menu
 }
 
 manage_xray_nodes() {
@@ -803,16 +808,14 @@ manage_xray_nodes() {
       '请选择 X-ray 节点类型：' \
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
-      '3) 查看已启用节点' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2/3]：' choice
+    read -r -p '请输入 [0/1/2]：' choice
     case "$choice" in
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
-      3) show_enabled_xray_nodes ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
     esac
   done
 }
@@ -991,16 +994,14 @@ manage_sing_box_nodes() {
       '请选择 sing-box 节点类型：' \
       '1) TUIC' \
       '2) AnyTLS' \
-      '3) 查看已启用节点' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2/3]：' choice
+    read -r -p '请输入 [0/1/2]：' choice
     case "$choice" in
       1) SING_NODE_TYPE="tuic"; setup_sing_box_node || true; pause_menu ;;
       2) SING_NODE_TYPE="anytls"; setup_sing_box_node || true; pause_menu ;;
-      3) show_enabled_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box' ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
     esac
   done
 }
@@ -1024,6 +1025,10 @@ main() {
     if [[ "$ACTION" == "update" ]]; then
       update_rainbow
       pause_menu
+      continue
+    fi
+    if [[ "$ACTION" == "show-nodes" ]]; then
+      show_all_nodes
       continue
     fi
     if [[ "$ACTION" == "xray-node" ]]; then
