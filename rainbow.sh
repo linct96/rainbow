@@ -534,6 +534,28 @@ setup_xray_node() {
   save_xray_client_info
 }
 
+show_enabled_xray_nodes() {
+  clear_screen
+  show_header '已启用节点'
+
+  if ! systemctl is-active --quiet "$XRAY_SERVICE"; then
+    printf 'Xray 服务未运行，暂无已启用节点。\n'
+  elif [[ ! -s "$XRAY_HOME/client.txt" ]] \
+    || ! grep -q '^分享链接：' "$XRAY_HOME/client.txt"; then
+    printf '暂无可展示的节点信息。\n'
+  else
+    awk '
+      /^分享链接：/ {
+        sub(/^分享链接：/, "")
+        if (shown++) print ""
+        print
+      }
+    ' "$XRAY_HOME/client.txt"
+  fi
+
+  pause_menu
+}
+
 manage_xray_nodes() {
   local choice
 
@@ -544,14 +566,16 @@ manage_xray_nodes() {
       '请选择 X-ray 节点类型：' \
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
+      '3) 查看已启用节点' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2]：' choice
+    read -r -p '请输入 [0/1/2/3]：' choice
     case "$choice" in
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
+      3) show_enabled_xray_nodes ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1 或 2。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
     esac
   done
 }
