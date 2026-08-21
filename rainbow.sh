@@ -343,6 +343,7 @@ rainbow_is_initialized() {
     && -f "/etc/systemd/system/${XRAY_SERVICE}.service" \
     && -x "$SING_BOX_HOME/sing-box" && -f "$SING_BOX_HOME/config.json" \
     && -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" \
+    && -x "$WGCF_BIN" && -s "$WGCF_ACCOUNT" && -s "$WGCF_PROFILE" \
     && -s "$SELF_SIGNED_TLS_CERT" && -s "$SELF_SIGNED_TLS_KEY" ]]
 }
 
@@ -360,6 +361,7 @@ initialize_rainbow() {
   read_latest_version
   install_sing_box
 
+  ensure_warp_profile || die "初始化 WARP 配置失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
   log "Rainbow 初始化完成"
 }
@@ -623,21 +625,14 @@ resolve_warp_endpoint() {
 }
 
 ensure_warp_profile() {
-  local answer
-
-  load_wgcf_profile && return
   install -d -m 0700 "$WARP_HOME"
   [[ -x "$WGCF_BIN" ]] || install_wgcf || return
+  load_wgcf_profile && return
 
   if [[ ! -s "$WGCF_ACCOUNT" ]]; then
     printf '%s\n' \
       '首次启用 WARP 需要通过 wgcf 注册 Cloudflare WARP 账户。' \
       '服务条款：https://www.cloudflare.com/application/terms/'
-    read -r -p '是否同意并继续 [y/N]：' answer
-    [[ "$answer" =~ ^[Yy]$ ]] || {
-      printf '已取消 WARP 配置。\n' >&2
-      return 1
-    }
     "$WGCF_BIN" register --accept-tos --config "$WGCF_ACCOUNT" || {
       [[ -s "$WGCF_ACCOUNT" ]] || return 1
       log "wgcf 已生成账户，继续验证配置"
