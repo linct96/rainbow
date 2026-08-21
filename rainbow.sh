@@ -362,7 +362,7 @@ generate_xray_credentials() {
 }
 
 write_xray_node_config() {
-  local config_file=$1 flow network
+  local current_config=$1 config_file=$2 flow network tag
 
   if [[ "$NODE_TYPE" == "xhttp" ]]; then
     network="xhttp"
@@ -371,20 +371,36 @@ write_xray_node_config() {
     network="tcp"
     flow="xtls-rprx-vision"
   fi
+  tag="rainbow-vless-${NODE_TYPE}"
 
-  jq -n \
+  jq \
     --argjson port "$NODE_PORT" \
     --arg uuid "$NODE_UUID" \
     --arg flow "$flow" \
     --arg network "$network" \
+    --arg tag "$tag" \
     --arg path "$NODE_PATH" \
     --arg target "${NODE_SERVER_NAME}:443" \
     --arg server_name "$NODE_SERVER_NAME" \
     --arg private_key "$NODE_PRIVATE_KEY" \
     --arg short_id "$NODE_SHORT_ID" '
-      {
-        log: {loglevel: "warning"},
-        inbounds: [{
+      def same_node_type:
+        ((.tag // "") == $tag) or
+        (
+          (.tag // "") == "" and
+          .protocol == "vless" and
+          .streamSettings.security == "reality" and
+          (if $network == "tcp" then
+            (.streamSettings.network // "tcp") == "tcp" or
+            (.streamSettings.network // "") == "raw"
+          else
+            .streamSettings.network == "xhttp"
+          end)
+        );
+
+      .inbounds = (
+        ((.inbounds // []) | map(select(same_node_type | not))) + [{
+          tag: $tag,
           listen: "0.0.0.0",
           port: $port,
           protocol: "vless",
@@ -410,17 +426,22 @@ write_xray_node_config() {
             enabled: true,
             destOverride: ["http", "tls", "quic"]
           }
-        }],
-        outbounds: [
-          {protocol: "freedom", tag: "direct"},
-          {protocol: "blackhole", tag: "block"}
-        ]
-      }
-    ' > "$config_file"
+        }]
+      )
+    ' "$current_config" > "$config_file"
 }
 
 save_xray_client_info() {
-  local encoded_path label uri
+  local all_clients="$XRAY_HOME/client.txt" client_file encoded_path first_line label uri
+
+  if [[ -f "$all_clients" && ! -f "$XRAY_HOME/client-xhttp.txt" \
+    && ! -f "$XRAY_HOME/client-tcp.txt" ]]; then
+    IFS= read -r first_line < "$all_clients" || true
+    case "$first_line" in
+      '类型：Rainbow-XHTTP') install -m 0600 "$all_clients" "$XRAY_HOME/client-xhttp.txt" ;;
+      '类型：Rainbow-TCP') install -m 0600 "$all_clients" "$XRAY_HOME/client-tcp.txt" ;;
+    esac
+  fi
 
   if [[ "$NODE_TYPE" == "xhttp" ]]; then
     encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
@@ -431,7 +452,8 @@ save_xray_client_info() {
     uri="vless://${NODE_UUID}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
   fi
 
-  install -m 0600 /dev/null "$XRAY_HOME/client.txt"
+  client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
+  install -m 0600 /dev/null "$client_file"
   printf '%s\n' \
     "类型：$label" \
     "地址：$NODE_ADDRESS" \
@@ -441,11 +463,18 @@ save_xray_client_info() {
     "UUID：$NODE_UUID" \
     "Public Key：$NODE_PUBLIC_KEY" \
     "Short ID：$NODE_SHORT_ID" \
-    "分享链接：$uri" > "$XRAY_HOME/client.txt"
+    "分享链接：$uri" > "$client_file"
+
+  install -m 0600 /dev/null "$all_clients"
+  for type in xhttp tcp; do
+    [[ -f "$XRAY_HOME/client-${type}.txt" ]] || continue
+    [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
+    cat "$XRAY_HOME/client-${type}.txt" >> "$all_clients"
+  done
 
   printf '\n节点搭建完成：\n'
-  cat "$XRAY_HOME/client.txt"
-  printf '客户端信息已保存至：%s\n\n' "$XRAY_HOME/client.txt"
+  cat "$client_file"
+  printf '全部客户端信息已保存至：%s\n\n' "$all_clients"
 }
 
 setup_xray_node() {
@@ -468,7 +497,7 @@ setup_xray_node() {
     printf '生成 Xray 凭据失败。\n' >&2
     return 1
   }
-  write_xray_node_config "$config_file"
+  write_xray_node_config "$XRAY_HOME/config.json" "$config_file"
   "$XRAY_HOME/xray" run -test -config "$config_file" || {
     printf 'Xray 配置验证失败，原配置未修改。\n' >&2
     return 1
