@@ -148,30 +148,26 @@ show_tls_status() {
 select_action() {
   printf '%s\n' \
     '请选择操作：' \
-    '1) sing-box' \
-    '2) Xray' \
-    '3) 搭建 X-ray 节点' \
-    '4) 搭建 sing-box 节点' \
-    '5) 查看所有节点' \
-    '6) 更新 rainbow' \
-    '7) 一键卸载' \
-    '8) TLS 证书管理' \
-    '9) 一键初始化' \
+    '1) 搭建 X-ray 节点' \
+    '2) 搭建 sing-box 节点' \
+    '3) 查看所有节点' \
+    '4) 更新 rainbow' \
+    '5) 一键卸载' \
+    '6) TLS 证书管理' \
+    '7) 一键初始化' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6/7/8/9]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
     case "$choice" in
-      1) ACTION="install"; PRODUCT="sing-box"; REPO="$SING_BOX_REPO"; return ;;
-      2) ACTION="install"; PRODUCT="xray"; REPO="$XRAY_REPO"; return ;;
-      3) ACTION="xray-node"; return ;;
-      4) ACTION="sing-box-node"; return ;;
-      5) ACTION="show-nodes"; return ;;
-      6) ACTION="update"; return ;;
-      7) ACTION="uninstall"; return ;;
-      8) ACTION="tls"; return ;;
-      9) ACTION="initialize"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5、6、7、8 或 9。\n' >&2 ;;
+      1) ACTION="xray-node"; return ;;
+      2) ACTION="sing-box-node"; return ;;
+      3) ACTION="show-nodes"; return ;;
+      4) ACTION="update"; return ;;
+      5) ACTION="uninstall"; return ;;
+      6) ACTION="tls"; return ;;
+      7) ACTION="initialize"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
     esac
   done
 }
@@ -185,22 +181,6 @@ read_latest_version() {
   [[ -n "$VERSION" ]] || die "未获取到 ${PRODUCT} 最新版本号"
   VERSION_NUMBER="${VERSION#v}"
   log "准备安装 ${PRODUCT} ${VERSION}"
-}
-
-read_version() {
-  local input
-  read -r -p "请输入 ${PRODUCT} 版本号（直接回车安装最新版）：" input
-
-  if [[ -z "$input" ]]; then
-    read_latest_version
-  else
-    VERSION="${input#v}"
-    [[ "$VERSION" =~ ^[0-9]+([.][0-9A-Za-z-]+)+$ ]] \
-      || die "版本号格式错误，例如：1.13.19 或 v1.13.19"
-    VERSION="v${VERSION}"
-    VERSION_NUMBER="${VERSION#v}"
-    log "准备安装 ${PRODUCT} ${VERSION}"
-  fi
 }
 
 download() {
@@ -1814,17 +1794,6 @@ main() {
       manage_tls_certificates
       continue
     fi
-
-    detect_arch
-    read_version
-
-    case "$PRODUCT" in
-      sing-box) install_sing_box ;;
-      xray) install_xray ;;
-    esac
-
-    log "${PRODUCT} ${VERSION} 安装完成"
-    pause_menu
   done
 }
 
