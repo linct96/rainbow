@@ -470,6 +470,13 @@ load_wgcf_profile() {
   WARP_ALLOWED_IPS=${WARP_ALLOWED_IPS:-0.0.0.0/0, ::/0}
 }
 
+detect_warp_domain_strategy() {
+  WARP_DOMAIN_STRATEGY=""
+  if ip -4 route show default | grep -q . && ! ip -6 route show default | grep -q .; then
+    WARP_DOMAIN_STRATEGY="ForceIPv4"
+  fi
+}
+
 ensure_warp_profile() {
   local answer
 
@@ -553,6 +560,7 @@ write_xray_node_config() {
     --arg warp_public_key "${WARP_PUBLIC_KEY:-}" \
     --arg warp_allowed_ips "${WARP_ALLOWED_IPS:-}" \
     --arg warp_endpoint "${WARP_ENDPOINT:-}" \
+    --arg warp_domain_strategy "${WARP_DOMAIN_STRATEGY:-}" \
     --argjson warp_mtu "${WARP_MTU:-1280}" '
       def csv:
         split(",") | map(gsub("^[ \t]+|[ \t]+$"; "")) | map(select(length > 0));
@@ -640,7 +648,7 @@ write_xray_node_config() {
             ((.outbounds // []) | map(select((.tag // "") != "rainbow-warp"))) + [{
               tag: "rainbow-warp",
               protocol: "wireguard",
-              settings: {
+              settings: ({
                 secretKey: $warp_private_key,
                 address: ($warp_addresses | csv),
                 peers: [{
@@ -649,7 +657,8 @@ write_xray_node_config() {
                   allowedIPs: ($warp_allowed_ips | csv)
                 }],
                 mtu: $warp_mtu
-              }
+              } + if $warp_domain_strategy == "" then {}
+                else {domainStrategy: $warp_domain_strategy} end)
             }]
           end
         )
@@ -742,6 +751,7 @@ setup_xray_node() {
       printf 'WARP 配置失败，原配置未修改。\n' >&2
       return 1
     }
+    detect_warp_domain_strategy
   fi
   read_node_details || return
   generate_xray_credentials || {
