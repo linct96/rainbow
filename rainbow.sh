@@ -710,7 +710,8 @@ save_xray_client_info() {
     esac
   fi
 
-  [[ "$NODE_TYPE" == "xhttp" ]] && label="Rainbow-XHTTP" || label="Rainbow-TCP"
+  [[ "$NODE_TYPE" == "xhttp" ]] \
+    && label="Rainbow-$(hostname)-XHTTP" || label="Rainbow-$(hostname)-TCP"
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
   install -m 0600 /dev/null "$client_file"
@@ -1004,7 +1005,8 @@ save_sing_box_client_info() {
   local all_clients="$SING_BOX_HOME/client.txt"
   local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label
 
-  [[ "$SING_NODE_TYPE" == "tuic" ]] && label="Rainbow-TUIC" || label="Rainbow-AnyTLS"
+  [[ "$SING_NODE_TYPE" == "tuic" ]] \
+    && label="Rainbow-$(hostname)-TUIC" || label="Rainbow-$(hostname)-AnyTLS"
   install -m 0600 /dev/null "$client_file"
   case "$WARP_MODE" in
     direct)
