@@ -463,28 +463,66 @@ load_wgcf_profile() {
   WARP_PUBLIC_KEY=$(read_wgcf_profile_value PublicKey)
   WARP_ALLOWED_IPS=$(read_wgcf_profile_value AllowedIPs)
   WARP_ENDPOINT=$(read_wgcf_profile_value Endpoint)
-  WARP_MTU=$(read_wgcf_profile_value MTU)
-  WARP_MTU=${WARP_MTU:-1280}
   [[ -n "$WARP_PRIVATE_KEY" && -n "$WARP_ADDRESSES" && -n "$WARP_PUBLIC_KEY" \
-    && -n "$WARP_ENDPOINT" && "$WARP_MTU" =~ ^[0-9]+$ ]] || return 1
+    && -n "$WARP_ENDPOINT" ]] || return 1
   WARP_ALLOWED_IPS=${WARP_ALLOWED_IPS:-0.0.0.0/0, ::/0}
 }
 
 detect_warp_domain_strategy() {
   WARP_DOMAIN_STRATEGY=""
-  if ip -4 route show default | grep -q . && ! ip -6 route show default | grep -q .; then
+  WARP_ENDPOINT_FAMILY=""
+  if ip -4 route show default | grep -q .; then
+    WARP_ENDPOINT_FAMILY="4"
+  elif ip -6 route show default | grep -q .; then
+    WARP_ENDPOINT_FAMILY="6"
+  fi
+  if [[ "$WARP_ENDPOINT_FAMILY" == "4" ]] && ! ip -6 route show default | grep -q .; then
     WARP_DOMAIN_STRATEGY="ForceIPv4"
+  elif [[ "$WARP_ENDPOINT_FAMILY" == "6" ]]; then
+    WARP_DOMAIN_STRATEGY="ForceIPv6"
   fi
 }
 
 resolve_warp_endpoint() {
-  WARP_ENDPOINT_ADDRESS=${WARP_ENDPOINT%:*}
+  local endpoint_address resolved_address="" automatic_mtu=1280
+
+  endpoint_address=${WARP_ENDPOINT%:*}
+  endpoint_address=${endpoint_address#[}
+  endpoint_address=${endpoint_address%]}
   WARP_ENDPOINT_PORT=${WARP_ENDPOINT##*:}
-  if [[ "$WARP_DOMAIN_STRATEGY" == "ForceIPv4" ]]; then
-    WARP_ENDPOINT_ADDRESS=$(getent ahostsv4 "$WARP_ENDPOINT_ADDRESS" \
-      | awk 'NR == 1 {print $1}')
+  [[ -n "$endpoint_address" && "$WARP_ENDPOINT_PORT" =~ ^[0-9]+$ ]] || return 1
+
+  case "$WARP_ENDPOINT_FAMILY" in
+    4)
+      resolved_address=$(getent ahostsv4 "$endpoint_address" \
+        | awk 'NR == 1 {print $1}' || true)
+      automatic_mtu=1440
+      ;;
+    6)
+      resolved_address=$(getent ahostsv6 "$endpoint_address" \
+        | awk 'NR == 1 {print $1}' || true)
+      automatic_mtu=1420
+      ;;
+    *) return 1 ;;
+  esac
+
+  WARP_ENDPOINT_ADDRESS=${resolved_address:-$endpoint_address}
+  WARP_MTU=$automatic_mtu
+  [[ -n "$resolved_address" ]] || WARP_MTU=1280
+  if [[ -n "$resolved_address" ]]; then
+    [[ "$WARP_ENDPOINT_FAMILY" == "4" ]] \
+      && WARP_ENDPOINT="${resolved_address}:${WARP_ENDPOINT_PORT}" \
+      || WARP_ENDPOINT="[${resolved_address}]:${WARP_ENDPOINT_PORT}"
   fi
-  [[ -n "$WARP_ENDPOINT_ADDRESS" && "$WARP_ENDPOINT_PORT" =~ ^[0-9]+$ ]]
+
+  if [[ -n "${WARP_MTU_OVERRIDE:-}" ]]; then
+    [[ "$WARP_MTU_OVERRIDE" =~ ^[0-9]+$ \
+      && "$WARP_MTU_OVERRIDE" -ge 1280 && "$WARP_MTU_OVERRIDE" -le "$WARP_MTU" ]] || {
+      printf 'WARP_MTU_OVERRIDE 必须在 1280 到 %s 之间。\n' "$WARP_MTU" >&2
+      return 1
+    }
+    WARP_MTU=$WARP_MTU_OVERRIDE
+  fi
 }
 
 ensure_warp_profile() {
@@ -758,11 +796,19 @@ setup_xray_node() {
 
   select_warp_mode
   if [[ "$WARP_MODE" != "direct" ]]; then
+    command -v getent >/dev/null 2>&1 || {
+      printf '搭建 Xray WARP 节点需要 getent 命令。\n' >&2
+      return 1
+    }
     ensure_warp_profile || {
       printf 'WARP 配置失败，原配置未修改。\n' >&2
       return 1
     }
     detect_warp_domain_strategy
+    resolve_warp_endpoint || {
+      printf 'WARP Endpoint 解析失败，原配置未修改。\n' >&2
+      return 1
+    }
   fi
   read_node_details || return
   generate_xray_credentials || {
