@@ -589,15 +589,15 @@ select_warp_mode() {
   printf '%s\n' \
     '' \
     '请选择该节点的 WARP 出站模式：' \
-    '1) 同时创建直出和 WARP 节点（默认）' \
-    '2) 不启用 WARP' \
+    '1) 仅启用直连节点（默认）' \
+    '2) 同时创建直出和 WARP 节点' \
     '3) 仅创建 WARP 节点' \
     ''
   while true; do
     read -r -p '请输入 [1/2/3]（直接回车选择 1）：' choice
     case "${choice:-1}" in
-      1) WARP_MODE="both"; return ;;
-      2) WARP_MODE="direct"; return ;;
+      1) WARP_MODE="direct"; return ;;
+      2) WARP_MODE="both"; return ;;
       3) WARP_MODE="warp"; return ;;
       *) printf '无效选项，请输入 1、2 或 3。\n' >&2 ;;
     esac
