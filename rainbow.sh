@@ -6,6 +6,7 @@ readonly SING_BOX_REPO="SagerNet/sing-box"
 readonly XRAY_REPO="XTLS/Xray-core"
 readonly WGCF_REPO="ViRb3/wgcf"
 readonly LEGO_REPO="go-acme/lego"
+readonly CLOUDFLARED_REPO="cloudflare/cloudflared"
 readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
 readonly RAINBOW_BIN="/usr/local/bin/rb"
 readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
@@ -37,6 +38,12 @@ readonly ACME_TIMER="rainbow-acme.timer"
 readonly SELF_SIGNED_TLS_SERVER_NAME="rainbow.local"
 readonly SING_BOX_SERVICE="rainbow-sing-box"
 readonly XRAY_SERVICE="rainbow-xray"
+readonly CLOUDFLARED_HOME="$RAINBOW_HOME/cloudflared"
+readonly CLOUDFLARED_BIN="$CLOUDFLARED_HOME/cloudflared"
+readonly CLOUDFLARED_LOG="$CLOUDFLARED_HOME/quick-tunnel.log"
+readonly CLOUDFLARED_HOST_FILE="$CLOUDFLARED_HOME/hostname"
+readonly CLOUDFLARED_ADDRESS_FILE="$CLOUDFLARED_HOME/client-address"
+readonly CLOUDFLARED_SERVICE="rainbow-cloudflared-quick"
 
 SING_BOX_TLS_CERT="$SELF_SIGNED_TLS_CERT"
 SING_BOX_TLS_KEY="$SELF_SIGNED_TLS_KEY"
@@ -112,10 +119,10 @@ download_rainbow() {
 }
 
 show_installation_status() {
-  local product binary_path
+  local product binary_path tunnel_status="未配置"
 
   printf '%s\n' '当前安装状态：'
-  for product in sing-box xray; do
+  for product in sing-box xray cloudflared; do
     binary_path="$RAINBOW_HOME/$product/$product"
     if [[ -x "$binary_path" ]]; then
       printf '  %-8s 已安装（路径：%s）\n' "$product" "$binary_path"
@@ -123,6 +130,14 @@ show_installation_status() {
       printf '  %-8s 未安装（路径：-）\n' "$product"
     fi
   done
+  if systemctl is-active --quiet "$CLOUDFLARED_SERVICE"; then
+    tunnel_status="运行中"
+    [[ ! -s "$CLOUDFLARED_HOST_FILE" ]] \
+      || tunnel_status+="（$(<"$CLOUDFLARED_HOST_FILE")）"
+  elif systemctl cat "$CLOUDFLARED_SERVICE" >/dev/null 2>&1; then
+    tunnel_status="未运行"
+  fi
+  printf '  %-8s %s\n' '临时隧道' "$tunnel_status"
   show_tls_status
   printf '  %-8s %s\n' '节点前缀' "$(get_node_prefix)"
   printf '\n'
@@ -229,7 +244,8 @@ uninstall_rainbow() {
     return 1
   }
 
-  for unit in "$ACME_TIMER" "$ACME_SERVICE" "$XRAY_SERVICE" "$SING_BOX_SERVICE"; do
+  for unit in "$ACME_TIMER" "$ACME_SERVICE" "$CLOUDFLARED_SERVICE" \
+    "$XRAY_SERVICE" "$SING_BOX_SERVICE"; do
     systemctl cat "$unit" >/dev/null 2>&1 || continue
     systemctl disable --now "$unit" || {
       printf '停止服务 %s 失败，卸载已中止。\n' "$unit" >&2
@@ -239,6 +255,7 @@ uninstall_rainbow() {
 
   rm -f "/etc/systemd/system/${XRAY_SERVICE}.service" \
     "/etc/systemd/system/${SING_BOX_SERVICE}.service" \
+    "/etc/systemd/system/${CLOUDFLARED_SERVICE}.service" \
     "/etc/systemd/system/${ACME_SERVICE}.service" \
     "/etc/systemd/system/${ACME_TIMER}" || return
   systemctl daemon-reload || return
@@ -357,6 +374,46 @@ EOF
   systemctl restart "$XRAY_SERVICE"
   "$XRAY_HOME/xray" version
   systemctl --no-pager --full status "$XRAY_SERVICE" || true
+}
+
+install_cloudflared() {
+  local actual release_json asset_name asset_url digest expected
+
+  detect_arch
+  asset_name="cloudflared-linux-${ARCH}"
+  log '正在查询 cloudflared 最新版本'
+  release_json=$(curl --retry 3 -fsSL \
+    "https://api.github.com/repos/${CLOUDFLARED_REPO}/releases/latest") \
+    || {
+      printf '查询 cloudflared 最新版本失败。\n' >&2
+      return 1
+    }
+  asset_url=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json")
+  digest=$(jq -r --arg name "$asset_name" \
+    '.assets[] | select(.name == $name) | .digest // empty' <<<"$release_json")
+  [[ -n "$asset_url" && "$asset_url" != "null" ]] || {
+    printf '未找到 cloudflared 安装包：%s\n' "$asset_name" >&2
+    return 1
+  }
+  [[ "$digest" == sha256:* ]] || {
+    printf 'cloudflared Release 未提供 SHA-256 校验值。\n' >&2
+    return 1
+  }
+
+  curl --retry 3 -fL "$asset_url" -o "$TMP_DIR/$asset_name" || {
+    printf '下载 cloudflared 失败。\n' >&2
+    return 1
+  }
+  expected=${digest#sha256:}
+  actual=$(sha256sum "$TMP_DIR/$asset_name" | awk '{print $1}')
+  [[ "$actual" == "$expected" ]] || {
+    printf 'cloudflared SHA-256 校验失败。\n' >&2
+    return 1
+  }
+  install -d -m 0700 "$CLOUDFLARED_HOME"
+  install -m 0755 "$TMP_DIR/$asset_name" "$CLOUDFLARED_BIN"
+  "$CLOUDFLARED_BIN" version
 }
 
 rainbow_is_initialized() {
@@ -512,6 +569,10 @@ read_node_details() {
     read_ws_node_details
     return
   fi
+  if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
+    read_quick_tunnel_node_details
+    return
+  fi
 
   read_node_port || return
   read_node_address
@@ -609,6 +670,41 @@ read_ws_node_details() {
     "  完整域名：$NODE_SERVER_NAME" \
     "  端口：$NODE_PORT" \
     '  SSL/TLS 模式：Full (strict)'
+}
+
+read_quick_tunnel_node_details() {
+  local input
+
+  read_node_port || return
+  NODE_SERVER_NAME=""
+  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
+  NODE_PATH=${input:-/$(random_hex 4)}
+  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
+  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
+    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
+    return 1
+  }
+
+  while true; do
+    read -r -p '请输入优选域名（直接回车使用临时隧道域名）：' input
+    input=$(normalize_domain "$input")
+    if [[ -z "$input" ]]; then
+      NODE_ADDRESS=$input
+      break
+    elif ! valid_domain "$input"; then
+      printf '优选域名格式错误，请勿输入协议、路径或端口。\n' >&2
+    elif ! command -v getent >/dev/null 2>&1 \
+      || ! getent ahosts "$input" >/dev/null 2>&1; then
+      printf '优选域名无法解析：%s\n' "$input" >&2
+    else
+      NODE_ADDRESS=$input
+      break
+    fi
+  done
+  printf '%s\n' \
+    "本地监听端口：$NODE_PORT" \
+    "WebSocket 路径：$NODE_PATH" \
+    '临时隧道域名将在 cloudflared 启动后生成。'
 }
 
 select_warp_mode() {
@@ -784,7 +880,7 @@ generate_xray_credentials() {
   if [[ "$WARP_MODE" == "both" ]]; then
     NODE_WARP_UUID=$("$XRAY_HOME/xray" uuid)
   fi
-  if [[ "$NODE_TYPE" == "ws" ]]; then
+  if [[ "$NODE_TYPE" == ws* ]]; then
     NODE_PRIVATE_KEY=""
     NODE_PUBLIC_KEY=""
     NODE_SHORT_ID=""
@@ -805,13 +901,16 @@ generate_xray_credentials() {
 }
 
 write_xray_node_config() {
-  local current_config=$1 config_file=$2 flow network security tag warp_email
+  local current_config=$1 config_file=$2 flow listen network security tag warp_email
 
   case "$NODE_TYPE" in
     xhttp) network="xhttp"; security="reality"; flow="" ;;
     tcp) network="tcp"; security="reality"; flow="xtls-rprx-vision" ;;
     ws) network="ws"; security="tls"; flow="" ;;
+    ws-tunnel) network="ws"; security="none"; flow="" ;;
   esac
+  listen="0.0.0.0"
+  [[ "$NODE_TYPE" != "ws-tunnel" ]] || listen="127.0.0.1"
   tag="rainbow-vless-${NODE_TYPE}"
   warp_email="rainbow-${NODE_TYPE}-warp"
 
@@ -821,6 +920,7 @@ write_xray_node_config() {
     --arg warp_uuid "$NODE_WARP_UUID" \
     --arg warp_mode "$WARP_MODE" \
     --arg flow "$flow" \
+    --arg listen "$listen" \
     --arg network "$network" \
     --arg security "$security" \
     --arg tag "$tag" \
@@ -875,35 +975,38 @@ write_xray_node_config() {
       .inbounds = (
         ((.inbounds // []) | map(select(same_node_type | not))) + [{
           tag: $tag,
-          listen: "0.0.0.0",
+          listen: $listen,
           port: $port,
           protocol: "vless",
           settings: {
             clients: node_clients,
             decryption: "none"
           },
-          streamSettings: ({
-            network: $network,
-            security: $security
-          } + if $network == "ws" then {
-            tlsSettings: {
-              certificates: [{
-                certificateFile: $certificate_file,
-                keyFile: $key_file
-              }]
-            },
-            wsSettings: {path: $path, host: $server_name}
-          } else {
-            realitySettings: {
-              show: false,
-              target: $target,
-              xver: 0,
-              serverNames: [$server_name],
-              privateKey: $private_key,
-              shortIds: [$short_id]
-            }
-          } end
-          + if $network == "xhttp" then {xhttpSettings: {path: $path}} else {} end),
+          streamSettings: (
+            {network: $network, security: $security}
+            + if $network == "ws" then
+                {wsSettings: ({path: $path}
+                  + if $security == "tls" then {host: $server_name} else {} end)}
+                + if $security == "tls" then {
+                    tlsSettings: {
+                      certificates: [{
+                        certificateFile: $certificate_file,
+                        keyFile: $key_file
+                      }]
+                    }
+                  } else {} end
+              else {
+                realitySettings: {
+                  show: false,
+                  target: $target,
+                  xver: 0,
+                  serverNames: [$server_name],
+                  privateKey: $private_key,
+                  shortIds: [$short_id]
+                }
+              } end
+            + if $network == "xhttp" then {xhttpSettings: {path: $path}} else {} end
+          ),
           sniffing: {
             enabled: true,
             destOverride: ["http", "tls", "quic"]
@@ -968,6 +1071,10 @@ write_xray_client_block() {
       encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
       uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
       ;;
+    ws-tunnel)
+      encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
+      ;;
   esac
 
   printf '%s\n' \
@@ -975,7 +1082,7 @@ write_xray_client_block() {
     "出站：$outbound" \
     "地址：$NODE_ADDRESS" \
     "端口：$NODE_PORT" >> "$client_file"
-  if [[ "$NODE_TYPE" == "ws" ]]; then
+  if [[ "$NODE_TYPE" == ws* ]]; then
     printf '%s\n' \
       "服务域名：$NODE_SERVER_NAME" \
       "WebSocket 路径：$NODE_PATH" \
@@ -1008,6 +1115,7 @@ save_xray_client_info() {
     xhttp) label="${prefix}-Rainbow-XHTTP" ;;
     tcp) label="${prefix}-Rainbow-TCP" ;;
     ws) label="${prefix}-Rainbow-WS" ;;
+    ws-tunnel) label="${prefix}-Rainbow-WS-Tunnel" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1037,11 +1145,133 @@ refresh_xray_client_info() {
   local all_clients="$XRAY_HOME/client.txt" type
 
   install -m 0600 /dev/null "$all_clients"
-  for type in xhttp tcp ws; do
+  for type in xhttp tcp ws ws-tunnel; do
     [[ -f "$XRAY_HOME/client-${type}.txt" ]] || continue
     [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
     cat "$XRAY_HOME/client-${type}.txt" >> "$all_clients"
   done
+}
+
+refresh_quick_tunnel_client() {
+  local client_file="$XRAY_HOME/client-ws-tunnel.txt" email hostname=""
+  local first=1 label preferred_address="" prefix uuid
+
+  for _ in {1..30}; do
+    if [[ -s "$CLOUDFLARED_LOG" ]]; then
+      hostname=$(grep -Eo '[a-z0-9-]+\.trycloudflare\.com' "$CLOUDFLARED_LOG" \
+        | tail -n 1 || true)
+    fi
+    [[ -z "$hostname" ]] || break
+    sleep 1
+  done
+  [[ "$hostname" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]] || {
+    printf '未获取到 Cloudflare 临时隧道域名。\n' >&2
+    return 1
+  }
+  jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws-tunnel")' \
+    "$XRAY_HOME/config.json" >/dev/null || return 1
+
+  install -m 0600 /dev/null "$CLOUDFLARED_HOST_FILE"
+  printf '%s\n' "$hostname" > "$CLOUDFLARED_HOST_FILE"
+  [[ ! -s "$CLOUDFLARED_ADDRESS_FILE" ]] \
+    || IFS= read -r preferred_address < "$CLOUDFLARED_ADDRESS_FILE"
+  NODE_TYPE="ws-tunnel"
+  NODE_ADDRESS=${preferred_address:-$hostname}
+  NODE_PORT=443
+  NODE_SERVER_NAME=$hostname
+  NODE_PATH=$(jq -r '
+    .inbounds[] | select(.tag == "rainbow-vless-ws-tunnel")
+    | .streamSettings.wsSettings.path
+  ' "$XRAY_HOME/config.json")
+  prefix=$(get_node_prefix)
+  label="${prefix}-Rainbow-WS-Tunnel"
+  install -m 0600 /dev/null "$client_file"
+
+  while IFS=$'\t' read -r uuid email; do
+    [[ -n "$uuid" ]] || continue
+    [[ "$first" == "1" ]] || printf '\n' >> "$client_file"
+    if [[ -n "$email" ]]; then
+      write_xray_client_block "$client_file" "$uuid" "${label}-WARP" "WARP"
+    else
+      write_xray_client_block "$client_file" "$uuid" "$label" "直出"
+    fi
+    first=0
+  done < <(jq -r '
+    .inbounds[] | select(.tag == "rainbow-vless-ws-tunnel")
+    | .settings.clients[] | [.id, (.email // "")] | @tsv
+  ' "$XRAY_HOME/config.json")
+  refresh_xray_client_info
+  log "Cloudflare 临时隧道域名：$hostname"
+}
+
+install_quick_tunnel_service() {
+  local rm_bin service_file="/etc/systemd/system/${CLOUDFLARED_SERVICE}.service" truncate_bin
+
+  rm_bin=$(command -v rm) || return 1
+  truncate_bin=$(command -v truncate) || return 1
+
+  install -m 0644 /dev/null "$service_file"
+  cat > "$service_file" <<EOF
+[Unit]
+Description=Rainbow Cloudflare Quick Tunnel
+After=network-online.target ${XRAY_SERVICE}.service
+Wants=network-online.target
+Requires=${XRAY_SERVICE}.service
+
+[Service]
+ExecStartPre=$truncate_bin -s 0 $CLOUDFLARED_LOG
+ExecStartPre=$rm_bin -f $CLOUDFLARED_HOST_FILE
+ExecStart=$CLOUDFLARED_BIN tunnel --config /dev/null --no-autoupdate --url http://127.0.0.1:$NODE_PORT
+ExecStartPost=$RAINBOW_BIN quick-tunnel-refresh
+Restart=always
+RestartSec=5s
+TimeoutStartSec=45s
+StandardOutput=append:$CLOUDFLARED_LOG
+StandardError=append:$CLOUDFLARED_LOG
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$CLOUDFLARED_SERVICE"
+  systemctl restart "$CLOUDFLARED_SERVICE"
+}
+
+setup_quick_tunnel_service() {
+  local address_backup="$TMP_DIR/cloudflared-address.backup"
+  local address_existed=0 service_backup="$TMP_DIR/cloudflared-service.backup"
+  local service_existed=0 service_file="/etc/systemd/system/${CLOUDFLARED_SERVICE}.service"
+
+  if [[ ! -x "$CLOUDFLARED_BIN" ]]; then
+    install_cloudflared || return 1
+  fi
+  if [[ -f "$service_file" ]]; then
+    install -m 0644 "$service_file" "$service_backup"
+    service_existed=1
+  fi
+  if [[ -f "$CLOUDFLARED_ADDRESS_FILE" ]]; then
+    install -m 0600 "$CLOUDFLARED_ADDRESS_FILE" "$address_backup"
+    address_existed=1
+  fi
+  install -d -m 0700 "$CLOUDFLARED_HOME"
+  install -m 0600 /dev/null "$CLOUDFLARED_ADDRESS_FILE"
+  printf '%s\n' "$NODE_ADDRESS" > "$CLOUDFLARED_ADDRESS_FILE"
+
+  if install_quick_tunnel_service; then
+    return
+  fi
+  if [[ "$service_existed" == "1" ]]; then
+    install -m 0644 "$service_backup" "$service_file"
+  else
+    rm -f "$service_file"
+  fi
+  if [[ "$address_existed" == "1" ]]; then
+    install -m 0600 "$address_backup" "$CLOUDFLARED_ADDRESS_FILE"
+  else
+    rm -f "$CLOUDFLARED_ADDRESS_FILE"
+  fi
+  systemctl daemon-reload
+  return 1
 }
 
 setup_xray_node() {
@@ -1101,6 +1331,19 @@ setup_xray_node() {
   fi
 
   log "原配置已备份：$backup_file"
+  if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
+    if ! setup_quick_tunnel_service; then
+      install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
+      systemctl restart "$XRAY_SERVICE" || true
+      systemctl restart "$CLOUDFLARED_SERVICE" >/dev/null 2>&1 || true
+      printf 'Cloudflare 临时隧道启动失败，已恢复原 Xray 配置。\n' >&2
+      return 1
+    fi
+    printf '\n节点搭建完成：\n'
+    cat "$XRAY_HOME/client-ws-tunnel.txt"
+    printf '临时隧道重启后域名会变化，请重新导入最新分享链接。\n\n'
+    return
+  fi
   save_xray_client_info
 }
 
@@ -1145,15 +1388,17 @@ manage_xray_nodes() {
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
       '3) VLESS + TLS + WebSocket + Cloudflare CDN' \
+      '4) VLESS + WebSocket + Cloudflare 临时隧道' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2/3]：' choice
+    read -r -p '请输入 [0/1/2/3/4]：' choice
     case "$choice" in
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
       3) NODE_TYPE="ws"; setup_xray_node || true; pause_menu ;;
+      4) NODE_TYPE="ws-tunnel"; setup_xray_node || true; pause_menu ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1、2 或 3。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2、3 或 4。\n' >&2 ;;
     esac
   done
 }
@@ -2089,6 +2334,11 @@ run_command() {
       require_commands
       init_temp_dir
       renew_acme_certificate
+      ;;
+    quick-tunnel-refresh)
+      require_root
+      require_commands
+      refresh_quick_tunnel_client
       ;;
     *) main ;;
   esac

@@ -23,9 +23,10 @@ rb
 ```text
 ~/rainbow/sing-box/
 ~/rainbow/xray/
+~/rainbow/cloudflared/
 ```
 
-对应的 systemd 服务为 `rainbow-sing-box` 和 `rainbow-xray`，不会覆盖其他方式安装的同名程序和服务。
+对应的 systemd 服务为 `rainbow-sing-box`、`rainbow-xray` 和可选的 `rainbow-cloudflared-quick`，不会覆盖其他方式安装的同名程序和服务。
 
 ## TLS 证书
 
@@ -94,4 +95,18 @@ SSL/TLS 模式：Full (strict)
 
 ```bash
 journalctl -u rainbow-acme.service
+```
+
+## VLESS + WebSocket + Cloudflare 临时隧道
+
+Xray 节点菜单支持创建无需域名、证书和 Cloudflare Token 的临时隧道节点。脚本会安装独立的 `cloudflared`，创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站，并注册 `rainbow-cloudflared-quick` 服务。
+
+客户端固定连接 `443` 端口。可以输入优选域名作为连接地址；留空时直接使用随机生成的 `*.trycloudflare.com` 域名。TLS SNI 和 WebSocket Host 始终使用该临时隧道域名。
+
+Quick Tunnel 仅适合测试：没有 SLA，最多支持 200 个并发请求，服务重启后域名会变化。脚本会自动刷新服务器上的客户端文件，但已经导入客户端的旧分享链接需要重新导入。
+
+查看隧道日志：
+
+```bash
+journalctl -u rainbow-cloudflared-quick.service
 ```
