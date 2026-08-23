@@ -26,7 +26,7 @@ rb
 ~/rainbow/cloudflared/
 ```
 
-对应的 systemd 服务为 `rainbow-sing-box`、`rainbow-xray` 和可选的 `rainbow-cloudflared-quick`，不会覆盖其他方式安装的同名程序和服务。
+对应的 systemd 服务为 `rainbow-sing-box`、`rainbow-xray`，以及可选的 `rainbow-cloudflared-quick`、`rainbow-cloudflared-named`，不会覆盖其他方式安装的同名程序和服务。
 
 ## TLS 证书
 
@@ -109,4 +109,27 @@ Quick Tunnel 仅适合测试：没有 SLA，最多支持 200 个并发请求，�
 
 ```bash
 journalctl -u rainbow-cloudflared-quick.service
+```
+
+## VLESS + WebSocket + Cloudflare 固定隧道
+
+固定隧道复用证书管理中保存的根域名。创建节点时只需输入子域名前缀、Cloudflare Tunnel Token 和可选的优选域名。例如根域名为 `example.com`，输入 `tunnel` 后使用：
+
+```text
+tunnel.example.com
+```
+
+脚本会显示需要在 Cloudflare Tunnel 的 `Published application` 中配置的内容：
+
+```text
+Hostname：tunnel.example.com
+Service：http://127.0.0.1:<脚本生成的端口>
+```
+
+Token 保存在 `~/rainbow/cloudflared/named-token`，权限为 `0600`。客户端固定连接 `443` 端口；优选域名只作为连接地址，TLS SNI 和 WebSocket Host 始终使用固定隧道域名。
+
+查看隧道日志：
+
+```bash
+journalctl -u rainbow-cloudflared-named.service
 ```
