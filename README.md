@@ -28,6 +28,17 @@ rb
 
 对应的 systemd 服务为 `rainbow-sing-box`、`rainbow-xray`，以及可选的 `rainbow-cloudflared-quick`、`rainbow-cloudflared-named`，不会覆盖其他方式安装的同名程序和服务。
 
+## 卸载节点
+
+主菜单中的 `卸载节点` 会列出当前 Rainbow 管理的节点。输入多个序号时可以使用空格或逗号分隔，例如：
+
+```text
+1 3 5
+1,3,5
+```
+
+删除操作只匹配 `rainbow-*` 标签。同一协议的直出和 WARP 节点会一起删除；没有其他 WARP 节点时，对应的共享 WARP 出站也会移除。删除 ARGO 节点时会同时清理对应的 cloudflared 服务和状态文件，不会删除共享程序、证书或 WARP 账户。
+
 ## TLS 证书
 
 主菜单会分别显示自签证书和 ACME 证书状态。自签证书会在初始化时生成，`证书管理` 只负责 ACME 证书的申请、重新配置和移除。

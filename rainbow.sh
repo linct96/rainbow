@@ -209,10 +209,11 @@ select_action() {
     '5) 证书管理' \
     '6) 一键初始化' \
     '7) 设置节点名称前缀' \
+    '8) 卸载节点' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6/7/8]：' choice
     case "$choice" in
       1) ACTION="xray-node"; return ;;
       2) ACTION="sing-box-node"; return ;;
@@ -221,7 +222,8 @@ select_action() {
       5) ACTION="tls"; return ;;
       6) ACTION="initialize"; return ;;
       7) ACTION="node-prefix"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
+      8) ACTION="remove-nodes"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5、6、7 或 8。\n' >&2 ;;
     esac
   done
 }
@@ -1565,6 +1567,286 @@ show_all_nodes() {
   pause_menu
 }
 
+add_removable_node() {
+  REMOVE_NODE_ENGINES+=("$1")
+  REMOVE_NODE_TYPES+=("$2")
+  REMOVE_NODE_LABELS+=("$3")
+  REMOVE_NODE_COUNT=$((REMOVE_NODE_COUNT + 1))
+}
+
+discover_removable_nodes() {
+  local label tag type
+
+  REMOVE_NODE_ENGINES=()
+  REMOVE_NODE_TYPES=()
+  REMOVE_NODE_LABELS=()
+  REMOVE_NODE_COUNT=0
+
+  if [[ -f "$XRAY_HOME/config.json" ]]; then
+    jq -e 'type == "object"' "$XRAY_HOME/config.json" >/dev/null || {
+      printf 'Xray 配置格式错误，无法读取节点。\n' >&2
+      return 1
+    }
+    for type in xhttp tcp ws ws-tunnel ws-named-tunnel; do
+      tag="rainbow-vless-${type}"
+      jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
+        "$XRAY_HOME/config.json" >/dev/null || continue
+      case "$type" in
+        xhttp) label="VLESS + REALITY + XHTTP" ;;
+        tcp) label="VLESS + REALITY + TCP" ;;
+        ws) label="VLESS + TLS + WebSocket CDN" ;;
+        ws-tunnel) label="VLESS + WebSocket ARGO（临时）" ;;
+        ws-named-tunnel) label="VLESS + WebSocket ARGO（固定）" ;;
+      esac
+      add_removable_node "Xray" "$type" "$label"
+    done
+  fi
+
+  if [[ -f "$SING_BOX_HOME/config.json" ]]; then
+    jq -e 'type == "object"' "$SING_BOX_HOME/config.json" >/dev/null || {
+      printf 'sing-box 配置格式错误，无法读取节点。\n' >&2
+      return 1
+    }
+    for type in tuic anytls hysteria2; do
+      tag="rainbow-${type}"
+      jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
+        "$SING_BOX_HOME/config.json" >/dev/null || continue
+      case "$type" in
+        tuic) label="TUIC" ;;
+        anytls) label="AnyTLS" ;;
+        hysteria2) label="Hysteria2" ;;
+      esac
+      add_removable_node "sing-box" "$type" "$label"
+    done
+  fi
+}
+
+parse_node_selection() {
+  local index normalized=${1//,/ } selected=" " token max=$2
+
+  SELECTED_NODE_INDEXES=()
+  SELECTED_NODE_COUNT=0
+  [[ -n "$normalized" && "$normalized" =~ ^[[:space:]0-9]+$ ]] || return 1
+  for token in $normalized; do
+    [[ ${#token} -le 3 ]] || return 1
+    index=$((10#$token))
+    ((index >= 1 && index <= max)) || return 1
+    [[ "$selected" == *" $index "* ]] && continue
+    SELECTED_NODE_INDEXES+=("$index")
+    SELECTED_NODE_COUNT=$((SELECTED_NODE_COUNT + 1))
+    selected+="$index "
+  done
+  ((SELECTED_NODE_COUNT > 0))
+}
+
+write_xray_removal_config() {
+  local current_config=$1 config_file=$2 types_json=$3
+
+  jq --argjson types "$types_json" '
+    def selected_tag($tag):
+      any($types[]; $tag == ("rainbow-vless-" + .));
+    def selected_user($users):
+      any($types[]; . as $type
+        | ($users | index("rainbow-" + $type + "-warp")) != null);
+
+    .inbounds = [(.inbounds // [])[] | select(selected_tag(.tag // "") | not)]
+    | .routing = ((.routing // {}) | .rules = [
+        (.rules // [])[] | select(selected_user(.user // []) | not)
+      ])
+    | ([.routing.rules[]? | select((.outboundTag // "") == "rainbow-warp")]
+        | length > 0) as $needs_warp
+    | if $needs_warp then .
+      else .outbounds = ((.outbounds // [])
+        | map(select((.tag // "") != "rainbow-warp")))
+      end
+  ' "$current_config" > "$config_file"
+}
+
+write_sing_box_removal_config() {
+  local current_config=$1 config_file=$2 types_json=$3
+
+  jq --argjson types "$types_json" '
+    def selected_tag($tag):
+      any($types[]; $tag == ("rainbow-" + .));
+    def selected_user($users):
+      any($types[]; . as $type
+        | ($users | index("rainbow-" + $type + "-warp")) != null);
+
+    .inbounds = [(.inbounds // [])[] | select(selected_tag(.tag // "") | not)]
+    | .route = ((.route // {}) | .rules = [
+        (.rules // [])[] | select(selected_user(.auth_user // []) | not)
+      ])
+    | ([.route.rules[]? | select((.outbound // "") == "rainbow-warp")]
+        | length > 0) as $needs_warp
+    | if $needs_warp then .
+      else .endpoints = ((.endpoints // [])
+        | map(select((.tag // "") != "rainbow-warp")))
+      end
+  ' "$current_config" > "$config_file"
+}
+
+remove_selected_nodes() {
+  local apply_failed=0 index named_active=0 named_selected=0 quick_active=0
+  local quick_selected=0 sing_backup="" sing_config="$TMP_DIR/remove-sing-box.json"
+  local sing_count=0 sing_types_json type xray_backup=""
+  local xray_config="$TMP_DIR/remove-xray.json" xray_count=0
+  local xray_types_json
+  local -a sing_types=() xray_types=()
+
+  for index in "${SELECTED_NODE_INDEXES[@]}"; do
+    index=$((index - 1))
+    if [[ "${REMOVE_NODE_ENGINES[index]}" == "Xray" ]]; then
+      type=${REMOVE_NODE_TYPES[index]}
+      xray_types+=("$type")
+      xray_count=$((xray_count + 1))
+      [[ "$type" != "ws-tunnel" ]] || quick_selected=1
+      [[ "$type" != "ws-named-tunnel" ]] || named_selected=1
+    else
+      sing_types+=("${REMOVE_NODE_TYPES[index]}")
+      sing_count=$((sing_count + 1))
+    fi
+  done
+
+  if ((xray_count > 0)); then
+    [[ -x "$XRAY_HOME/xray" ]] || {
+      printf '缺少 Rainbow 管理的 Xray，无法删除节点。\n' >&2
+      return 1
+    }
+    xray_types_json=$(printf '%s\n' "${xray_types[@]}" | jq -Rn '[inputs]')
+    write_xray_removal_config "$XRAY_HOME/config.json" "$xray_config" "$xray_types_json" \
+      && "$XRAY_HOME/xray" run -test -config "$xray_config" || {
+        printf '删除后的 Xray 配置验证失败，原配置未修改。\n' >&2
+        return 1
+      }
+    xray_backup=$(mktemp "$XRAY_HOME/config.json.backup.XXXXXX")
+    install -m 0600 "$XRAY_HOME/config.json" "$xray_backup" || return 1
+  fi
+
+  if ((sing_count > 0)); then
+    [[ -x "$SING_BOX_HOME/sing-box" ]] || {
+      printf '缺少 Rainbow 管理的 sing-box，无法删除节点。\n' >&2
+      return 1
+    }
+    sing_types_json=$(printf '%s\n' "${sing_types[@]}" | jq -Rn '[inputs]')
+    write_sing_box_removal_config "$SING_BOX_HOME/config.json" "$sing_config" \
+      "$sing_types_json" && "$SING_BOX_HOME/sing-box" check -c "$sing_config" || {
+        printf '删除后的 sing-box 配置验证失败，原配置未修改。\n' >&2
+        return 1
+      }
+    sing_backup=$(mktemp "$SING_BOX_HOME/config.json.backup.XXXXXX")
+    install -m 0600 "$SING_BOX_HOME/config.json" "$sing_backup" || return 1
+  fi
+
+  if [[ "$quick_selected" == "1" ]] \
+    && systemctl cat "$CLOUDFLARED_SERVICE" >/dev/null 2>&1; then
+    systemctl is-active --quiet "$CLOUDFLARED_SERVICE" && quick_active=1
+    if ! systemctl stop "$CLOUDFLARED_SERVICE"; then
+      [[ "$quick_active" == "0" ]] || systemctl restart "$CLOUDFLARED_SERVICE" || true
+      return 1
+    fi
+  fi
+  if [[ "$named_selected" == "1" ]] \
+    && systemctl cat "$CLOUDFLARED_NAMED_SERVICE" >/dev/null 2>&1; then
+    systemctl is-active --quiet "$CLOUDFLARED_NAMED_SERVICE" && named_active=1
+    if ! systemctl stop "$CLOUDFLARED_NAMED_SERVICE"; then
+      [[ "$quick_active" == "0" ]] || systemctl restart "$CLOUDFLARED_SERVICE" || true
+      return 1
+    fi
+  fi
+
+  if [[ -n "$xray_backup" ]] && ! install -m 0600 "$xray_config" \
+    "$XRAY_HOME/config.json"; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" && -n "$sing_backup" ]] \
+    && ! install -m 0600 "$sing_config" "$SING_BOX_HOME/config.json"; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" && -n "$xray_backup" ]] \
+    && ! systemctl restart "$XRAY_SERVICE"; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" && -n "$sing_backup" ]] \
+    && ! systemctl restart "$SING_BOX_SERVICE"; then
+    apply_failed=1
+  fi
+
+  if [[ "$apply_failed" == "1" ]]; then
+    [[ -z "$xray_backup" ]] \
+      || install -m 0600 "$xray_backup" "$XRAY_HOME/config.json" || true
+    [[ -z "$sing_backup" ]] \
+      || install -m 0600 "$sing_backup" "$SING_BOX_HOME/config.json" || true
+    [[ -z "$xray_backup" ]] || systemctl restart "$XRAY_SERVICE" || true
+    [[ -z "$sing_backup" ]] || systemctl restart "$SING_BOX_SERVICE" || true
+    [[ "$quick_active" == "0" ]] || systemctl restart "$CLOUDFLARED_SERVICE" || true
+    [[ "$named_active" == "0" ]] \
+      || systemctl restart "$CLOUDFLARED_NAMED_SERVICE" || true
+    printf '节点删除失败，已恢复原配置。\n' >&2
+    return 1
+  fi
+
+  for type in ${xray_types[@]+"${xray_types[@]}"}; do
+    rm -f "$XRAY_HOME/client-${type}.txt"
+  done
+  for type in ${sing_types[@]+"${sing_types[@]}"}; do
+    rm -f "$SING_BOX_HOME/client-${type}.txt"
+  done
+  ((xray_count == 0)) || refresh_xray_client_info
+  ((sing_count == 0)) || refresh_sing_box_client_info
+
+  if [[ "$quick_selected" == "1" ]]; then
+    systemctl disable "$CLOUDFLARED_SERVICE" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${CLOUDFLARED_SERVICE}.service" \
+      "$CLOUDFLARED_LOG" "$CLOUDFLARED_HOST_FILE" "$CLOUDFLARED_ADDRESS_FILE"
+  fi
+  if [[ "$named_selected" == "1" ]]; then
+    systemctl disable "$CLOUDFLARED_NAMED_SERVICE" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${CLOUDFLARED_NAMED_SERVICE}.service" \
+      "$CLOUDFLARED_NAMED_TOKEN_FILE" "$CLOUDFLARED_NAMED_HOST_FILE"
+  fi
+  if [[ "$quick_selected" == "1" || "$named_selected" == "1" ]]; then
+    systemctl daemon-reload
+  fi
+}
+
+manage_node_removal() {
+  local answer index input
+
+  clear_screen
+  show_header '卸载节点'
+  discover_removable_nodes || return 1
+  if ((REMOVE_NODE_COUNT == 0)); then
+    printf '当前没有 Rainbow 管理的节点。\n'
+    return
+  fi
+
+  printf '可卸载节点：\n'
+  for ((index = 0; index < REMOVE_NODE_COUNT; index++)); do
+    printf '%d) %-8s %s\n' "$((index + 1))" "${REMOVE_NODE_ENGINES[index]}" \
+      "${REMOVE_NODE_LABELS[index]}"
+  done
+  printf '\n同一协议的直出和 WARP 节点会一起删除。\n'
+  read -r -p '请输入要删除的序号，多个序号使用空格或逗号分隔：' input
+  parse_node_selection "$input" "$REMOVE_NODE_COUNT" || {
+    printf '序号格式错误或超出范围。\n' >&2
+    return 1
+  }
+
+  printf '\n将删除：\n'
+  for index in "${SELECTED_NODE_INDEXES[@]}"; do
+    printf '  %d) %s - %s\n' "$index" "${REMOVE_NODE_ENGINES[index - 1]}" \
+      "${REMOVE_NODE_LABELS[index - 1]}"
+  done
+  read -r -p '请输入 DELETE 确认删除：' answer
+  [[ "$answer" == "DELETE" ]] || {
+    printf '已取消删除。\n'
+    return 1
+  }
+
+  remove_selected_nodes || return 1
+  log "已删除 ${SELECTED_NODE_COUNT} 个节点"
+}
+
 manage_xray_nodes() {
   local choice
 
@@ -2493,6 +2775,11 @@ main() {
     fi
     if [[ "$ACTION" == "show-nodes" ]]; then
       show_all_nodes
+      continue
+    fi
+    if [[ "$ACTION" == "remove-nodes" ]]; then
+      manage_node_removal || true
+      pause_menu
       continue
     fi
     if [[ "$ACTION" == "xray-node" ]]; then
