@@ -9,6 +9,7 @@ readonly LEGO_REPO="go-acme/lego"
 readonly RAINBOW_URL="https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh"
 readonly RAINBOW_BIN="/usr/local/bin/rb"
 readonly RAINBOW_HOME="${HOME:-/root}/rainbow"
+readonly NODE_PREFIX_FILE="$RAINBOW_HOME/node-prefix"
 readonly SING_BOX_HOME="$RAINBOW_HOME/sing-box"
 readonly XRAY_HOME="$RAINBOW_HOME/xray"
 readonly WARP_HOME="$XRAY_HOME/warp"
@@ -123,7 +124,32 @@ show_installation_status() {
     fi
   done
   show_tls_status
+  printf '  %-8s %s\n' '节点前缀' "$(get_node_prefix)"
   printf '\n'
+}
+
+get_node_prefix() {
+  local prefix
+
+  if [[ -s "$NODE_PREFIX_FILE" ]]; then
+    IFS= read -r prefix < "$NODE_PREFIX_FILE"
+  fi
+  printf '%s\n' "${prefix:-$(hostname)}"
+}
+
+configure_node_prefix() {
+  local default_prefix input
+
+  default_prefix=$(hostname)
+  show_header '节点名称设置'
+  printf '当前节点前缀：%s\n' "$(get_node_prefix)"
+  read -r -p "请输入节点前缀（直接回车使用 ${default_prefix}）：" input
+  input=${input:-$default_prefix}
+
+  install -d -m 0700 "$RAINBOW_HOME"
+  printf '%s\n' "$input" > "$NODE_PREFIX_FILE"
+  chmod 0600 "$NODE_PREFIX_FILE"
+  printf '节点名称将使用：%s-Rainbow-{协议}\n' "$input"
 }
 
 show_tls_status() {
@@ -156,10 +182,11 @@ select_action() {
     '4) 一键卸载' \
     '5) 证书管理' \
     '6) 一键初始化' \
+    '7) 设置节点名称前缀' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6]：' choice
+    read -r -p '请输入 [1/2/3/4/5/6/7]：' choice
     case "$choice" in
       1) ACTION="xray-node"; return ;;
       2) ACTION="sing-box-node"; return ;;
@@ -167,7 +194,8 @@ select_action() {
       4) ACTION="uninstall"; return ;;
       5) ACTION="tls"; return ;;
       6) ACTION="initialize"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5 或 6。\n' >&2 ;;
+      7) ACTION="node-prefix"; return ;;
+      *) printf '无效选项，请输入 1、2、3、4、5、6 或 7。\n' >&2 ;;
     esac
   done
 }
@@ -924,19 +952,21 @@ write_xray_node_config() {
 }
 
 write_xray_client_block() {
-  local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_path uri
+  local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_label encoded_path uri
+
+  encoded_label=$(jq -rn --arg value "$label" '$value | @uri')
 
   case "$NODE_TYPE" in
     xhttp)
       encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${label}"
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=xhttp&path=${encoded_path}&mode=auto#${encoded_label}"
       ;;
     tcp)
-      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${label}"
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${NODE_SERVER_NAME}&fp=chrome&pbk=${NODE_PUBLIC_KEY}&sid=${NODE_SHORT_ID}&type=tcp&headerType=none#${encoded_label}"
       ;;
     ws)
       encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${label}"
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
       ;;
   esac
 
@@ -962,7 +992,7 @@ write_xray_client_block() {
 }
 
 save_xray_client_info() {
-  local all_clients="$XRAY_HOME/client.txt" client_file first_line label
+  local all_clients="$XRAY_HOME/client.txt" client_file first_line label prefix
 
   if [[ -f "$all_clients" && ! -f "$XRAY_HOME/client-xhttp.txt" \
     && ! -f "$XRAY_HOME/client-tcp.txt" ]]; then
@@ -973,10 +1003,11 @@ save_xray_client_info() {
     esac
   fi
 
+  prefix=$(get_node_prefix)
   case "$NODE_TYPE" in
-    xhttp) label="Rainbow-$(hostname)-XHTTP" ;;
-    tcp) label="Rainbow-$(hostname)-TCP" ;;
-    ws) label="Rainbow-$(hostname)-WS" ;;
+    xhttp) label="${prefix}-Rainbow-XHTTP" ;;
+    tcp) label="${prefix}-Rainbow-TCP" ;;
+    ws) label="${prefix}-Rainbow-WS" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1792,7 +1823,9 @@ write_sing_box_node_config() {
 }
 
 write_sing_box_client_block() {
-  local client_file=$1 uuid=$2 password=$3 label=$4 outbound=$5 uri
+  local client_file=$1 uuid=$2 password=$3 label=$4 outbound=$5 encoded_label uri
+
+  encoded_label=$(jq -rn --arg value "$label" '$value | @uri')
 
   case "$SING_NODE_TYPE" in
     tuic)
@@ -1810,7 +1843,7 @@ write_sing_box_client_block() {
       fi
       ;;
   esac
-  uri+="#${label}"
+  uri+="#${encoded_label}"
 
   printf '%s\n' \
     "类型：$label" \
@@ -1824,12 +1857,13 @@ write_sing_box_client_block() {
 }
 
 save_sing_box_client_info() {
-  local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label
+  local client_file="$SING_BOX_HOME/client-${SING_NODE_TYPE}.txt" label prefix
 
+  prefix=$(get_node_prefix)
   case "$SING_NODE_TYPE" in
-    tuic) label="Rainbow-$(hostname)-TUIC" ;;
-    anytls) label="Rainbow-$(hostname)-AnyTLS" ;;
-    hysteria2) label="Rainbow-$(hostname)-HY2" ;;
+    tuic) label="${prefix}-Rainbow-TUIC" ;;
+    anytls) label="${prefix}-Rainbow-AnyTLS" ;;
+    hysteria2) label="${prefix}-Rainbow-HY2" ;;
   esac
   install -m 0600 /dev/null "$client_file"
   case "$WARP_MODE" in
@@ -2038,6 +2072,11 @@ main() {
     fi
     if [[ "$ACTION" == "tls" ]]; then
       manage_tls_certificates
+      continue
+    fi
+    if [[ "$ACTION" == "node-prefix" ]]; then
+      configure_node_prefix
+      pause_menu
       continue
     fi
   done
