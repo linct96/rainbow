@@ -4,8 +4,10 @@ set -Eeuo pipefail
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+export HOME="$tmp/home"
 
 source "$(dirname "$0")/rainbow.sh"
+install -d -m 0700 "$XRAY_HOME"
 printf '{"inbounds":[],"outbounds":[],"routing":{"rules":[]}}\n' > "$tmp/base.json"
 
 NODE_TYPE="ws-named-tunnel"
@@ -32,8 +34,22 @@ jq -e '
 ' "$tmp/config.json" >/dev/null
 
 NODE_PORT=443
-write_xray_client_block "$tmp/client.txt" "$NODE_UUID" "test" "直出"
-grep -F '分享链接：vless://11111111-1111-4111-8111-111111111111@www.ox.ac.uk:443?encryption=none&security=tls&sni=tunnel.example.com&fp=chrome&type=ws&host=tunnel.example.com&path=%2Ffixed#test' \
-  "$tmp/client.txt" >/dev/null
+printf 'test\n' > "$NODE_PREFIX_FILE"
+save_xray_client_info >/dev/null
+grep -Fx '类型：test-Rainbow-ARGO' "$XRAY_HOME/client-ws-named-tunnel.txt" >/dev/null
+grep -F '#test-Rainbow-ARGO' "$XRAY_HOME/client-ws-named-tunnel.txt" >/dev/null
 
-printf '固定隧道配置测试通过。\n'
+QUICK_CALLED=0
+NAMED_CALLED=0
+read_quick_tunnel_node_details() { QUICK_CALLED=1; }
+read_named_tunnel_node_details() { NAMED_CALLED=1; }
+
+NODE_TYPE="ws-tunnel"
+read_tunnel_node_details <<< "" >/dev/null
+[[ "$NODE_TYPE" == "ws-tunnel" && "$QUICK_CALLED" == "1" ]]
+
+read_tunnel_node_details <<< "test-token" >/dev/null
+[[ "$NODE_TYPE" == "ws-named-tunnel" && "$NAMED_CALLED" == "1" \
+  && "$NODE_TUNNEL_TOKEN" == "test-token" ]]
+
+printf 'Argo 隧道配置测试通过。\n'

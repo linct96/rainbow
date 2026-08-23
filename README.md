@@ -97,11 +97,13 @@ SSL/TLS 模式：Full (strict)
 journalctl -u rainbow-acme.service
 ```
 
-## VLESS + WebSocket + Cloudflare 临时隧道
+## VLESS + WebSocket + Cloudflare Argo 隧道
 
-Xray 节点菜单支持创建无需域名、证书和 Cloudflare Token 的临时隧道节点。脚本会安装独立的 `cloudflared`，创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站，并注册 `rainbow-cloudflared-quick` 服务。
+Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-Rainbow-ARGO`，WARP 节点追加 `-WARP`。
 
-客户端固定连接 `443` 端口。可以输入优选域名作为连接地址；留空时直接使用随机生成的 `*.trycloudflare.com` 域名。TLS SNI 和 WebSocket Host 始终使用该临时隧道域名。
+脚本会安装独立的 `cloudflared`，并创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站。客户端固定连接 `443` 端口，可以另外输入优选域名作为连接地址。
+
+Token 留空时注册 `rainbow-cloudflared-quick` 服务。TLS SNI 和 WebSocket Host 使用随机生成的 `*.trycloudflare.com` 域名。
 
 Quick Tunnel 仅适合测试：没有 SLA，最多支持 200 个并发请求，服务重启后域名会变化。脚本会自动刷新服务器上的客户端文件，但已经导入客户端的旧分享链接需要重新导入。
 
@@ -111,9 +113,7 @@ Quick Tunnel 仅适合测试：没有 SLA，最多支持 200 个并发请求，�
 journalctl -u rainbow-cloudflared-quick.service
 ```
 
-## VLESS + WebSocket + Cloudflare 固定隧道
-
-固定隧道复用证书管理中保存的根域名。创建节点时只需输入子域名前缀、Cloudflare Tunnel Token 和可选的优选域名。例如根域名为 `example.com`，输入 `tunnel` 后使用：
+输入 Token 时注册 `rainbow-cloudflared-named` 服务，并复用证书管理中保存的根域名。例如根域名为 `example.com`，输入子域名前缀 `tunnel` 后使用：
 
 ```text
 tunnel.example.com
@@ -128,7 +128,7 @@ Service：http://127.0.0.1:<脚本生成的端口>
 
 Token 保存在 `~/rainbow/cloudflared/named-token`，权限为 `0600`。客户端固定连接 `443` 端口；优选域名只作为连接地址，TLS SNI 和 WebSocket Host 始终使用固定隧道域名。
 
-查看隧道日志：
+查看固定隧道日志：
 
 ```bash
 journalctl -u rainbow-cloudflared-named.service

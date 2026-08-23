@@ -582,12 +582,8 @@ read_node_details() {
     read_ws_node_details
     return
   fi
-  if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
-    read_quick_tunnel_node_details
-    return
-  fi
-  if [[ "$NODE_TYPE" == "ws-named-tunnel" ]]; then
-    read_named_tunnel_node_details
+  if [[ "$NODE_TYPE" == "ws-tunnel" || "$NODE_TYPE" == "ws-named-tunnel" ]]; then
+    read_tunnel_node_details
     return
   fi
 
@@ -724,6 +720,23 @@ read_quick_tunnel_node_details() {
     '临时隧道域名将在 cloudflared 启动后生成。'
 }
 
+read_tunnel_node_details() {
+  read -r -s -p '请输入 Cloudflare Tunnel Token（留空创建临时隧道）：' \
+    NODE_TUNNEL_TOKEN
+  printf '\n'
+
+  if [[ -z "$NODE_TUNNEL_TOKEN" ]]; then
+    NODE_TYPE="ws-tunnel"
+    read_quick_tunnel_node_details
+  else
+    NODE_TYPE="ws-named-tunnel"
+    if ! read_named_tunnel_node_details; then
+      NODE_TUNNEL_TOKEN=""
+      return 1
+    fi
+  fi
+}
+
 read_named_tunnel_node_details() {
   local input root_domain
 
@@ -770,13 +783,6 @@ read_named_tunnel_node_details() {
       break
     fi
   done
-
-  read -r -s -p '请输入 Cloudflare Tunnel Token：' NODE_TUNNEL_TOKEN
-  printf '\n'
-  [[ -n "$NODE_TUNNEL_TOKEN" ]] || {
-    printf 'Tunnel Token 不能为空。\n' >&2
-    return 1
-  }
 
   printf '%s\n' \
     "完整隧道域名：$NODE_SERVER_NAME" \
@@ -1200,8 +1206,7 @@ save_xray_client_info() {
     xhttp) label="${prefix}-Rainbow-XHTTP" ;;
     tcp) label="${prefix}-Rainbow-TCP" ;;
     ws) label="${prefix}-Rainbow-WS" ;;
-    ws-tunnel) label="${prefix}-Rainbow-WS-Tunnel" ;;
-    ws-named-tunnel) label="${prefix}-Rainbow-WS-Named-Tunnel" ;;
+    ws-tunnel | ws-named-tunnel) label="${prefix}-Rainbow-ARGO" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1270,7 +1275,7 @@ refresh_quick_tunnel_client() {
     | .streamSettings.wsSettings.path
   ' "$XRAY_HOME/config.json")
   prefix=$(get_node_prefix)
-  label="${prefix}-Rainbow-WS-Tunnel"
+  label="${prefix}-Rainbow-ARGO"
   install -m 0600 /dev/null "$client_file"
 
   while IFS=$'\t' read -r uuid email; do
@@ -1571,19 +1576,17 @@ manage_xray_nodes() {
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
       '3) VLESS + TLS + WebSocket + Cloudflare CDN' \
-      '4) VLESS + WebSocket + Cloudflare 临时隧道' \
-      '5) VLESS + WebSocket + Cloudflare 固定隧道' \
+      '4) VLESS + WebSocket + Cloudflare Argo 隧道' \
       '0) 返回' \
       ''
-    read -r -p '请输入 [0/1/2/3/4/5]：' choice
+    read -r -p '请输入 [0/1/2/3/4]：' choice
     case "$choice" in
       1) NODE_TYPE="xhttp"; setup_xray_node || true; pause_menu ;;
       2) NODE_TYPE="tcp"; setup_xray_node || true; pause_menu ;;
       3) NODE_TYPE="ws"; setup_xray_node || true; pause_menu ;;
       4) NODE_TYPE="ws-tunnel"; setup_xray_node || true; pause_menu ;;
-      5) NODE_TYPE="ws-named-tunnel"; setup_xray_node || true; pause_menu ;;
       0) return ;;
-      *) printf '无效选项，请输入 0、1、2、3、4 或 5。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2、3 或 4。\n' >&2 ;;
     esac
   done
 }
