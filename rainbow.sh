@@ -122,7 +122,7 @@ download_rainbow() {
 }
 
 show_installation_status() {
-  local product binary_path named_tunnel_status="未配置" tunnel_status="未配置"
+  local product binary_path tunnel_status="未配置"
 
   printf '%s\n' '当前安装状态：'
   for product in sing-box xray; do
@@ -137,18 +137,15 @@ show_installation_status() {
     tunnel_status="运行中"
     [[ ! -s "$CLOUDFLARED_HOST_FILE" ]] \
       || tunnel_status+="（$(<"$CLOUDFLARED_HOST_FILE")）"
-  elif systemctl cat "$CLOUDFLARED_SERVICE" >/dev/null 2>&1; then
+  elif systemctl is-active --quiet "$CLOUDFLARED_NAMED_SERVICE"; then
+    tunnel_status="运行中"
+    [[ ! -s "$CLOUDFLARED_NAMED_HOST_FILE" ]] \
+      || tunnel_status+="（$(<"$CLOUDFLARED_NAMED_HOST_FILE")）"
+  elif systemctl cat "$CLOUDFLARED_SERVICE" >/dev/null 2>&1 \
+    || systemctl cat "$CLOUDFLARED_NAMED_SERVICE" >/dev/null 2>&1; then
     tunnel_status="未运行"
   fi
-  if systemctl is-active --quiet "$CLOUDFLARED_NAMED_SERVICE"; then
-    named_tunnel_status="运行中"
-    [[ ! -s "$CLOUDFLARED_NAMED_HOST_FILE" ]] \
-      || named_tunnel_status+="（$(<"$CLOUDFLARED_NAMED_HOST_FILE")）"
-  elif systemctl cat "$CLOUDFLARED_NAMED_SERVICE" >/dev/null 2>&1; then
-    named_tunnel_status="未运行"
-  fi
-  printf '  %-8s 临时：%s；固定：%s\n' \
-    '隧道' "$tunnel_status" "$named_tunnel_status"
+  printf '  %-8s %s\n' '隧道' "$tunnel_status"
   show_tls_status
   printf '  %-8s %s\n' '节点前缀' "$(get_node_prefix)"
   printf '\n'
@@ -205,25 +202,27 @@ select_action() {
     '1) 查看所有节点' \
     '2) 搭建 X-ray 节点' \
     '3) 搭建 sing-box 节点' \
-    '4) 一键卸载' \
     '5) 证书管理' \
     '6) 一键初始化' \
     '7) 设置节点名称前缀' \
     '8) 卸载节点' \
+    '99) 一键卸载' \
+    '0) 退出脚本' \
     ''
 
   while true; do
-    read -r -p '请输入 [1/2/3/4/5/6/7/8]：' choice
+    read -r -p '请输入 [0/1/2/3/5/6/7/8/99]：' choice
     case "$choice" in
       1) ACTION="show-nodes"; return ;;
       2) ACTION="xray-node"; return ;;
       3) ACTION="sing-box-node"; return ;;
-      4) ACTION="uninstall"; return ;;
       5) ACTION="tls"; return ;;
       6) ACTION="initialize"; return ;;
       7) ACTION="node-prefix"; return ;;
       8) ACTION="remove-nodes"; return ;;
-      *) printf '无效选项，请输入 1、2、3、4、5、6、7 或 8。\n' >&2 ;;
+      99) ACTION="uninstall"; return ;;
+      0) exit ;;
+      *) printf '无效选项，请输入 0、1、2、3、5、6、7、8 或 99。\n' >&2 ;;
     esac
   done
 }
