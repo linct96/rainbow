@@ -203,7 +203,6 @@ select_action() {
     '2) 搭建 X-ray 节点' \
     '3) 搭建 sing-box 节点' \
     '5) 证书管理' \
-    '6) 一键初始化' \
     '7) 设置节点名称前缀' \
     '8) 卸载节点' \
     '99) 一键卸载' \
@@ -211,18 +210,17 @@ select_action() {
     ''
 
   while true; do
-    read -r -p '请输入 [0/1/2/3/5/6/7/8/99]：' choice
+    read -r -p '请输入 [0/1/2/3/5/7/8/99]：' choice
     case "$choice" in
       1) ACTION="show-nodes"; return ;;
       2) ACTION="xray-node"; return ;;
       3) ACTION="sing-box-node"; return ;;
       5) ACTION="tls"; return ;;
-      6) ACTION="initialize"; return ;;
       7) ACTION="node-prefix"; return ;;
       8) ACTION="remove-nodes"; return ;;
       99) ACTION="uninstall"; return ;;
       0) exit ;;
-      *) printf '无效选项，请输入 0、1、2、3、5、6、7、8 或 99。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2、3、5、7、8 或 99。\n' >&2 ;;
     esac
   done
 }
@@ -456,12 +454,6 @@ initialize_rainbow() {
   ensure_warp_profile || die "初始化 WARP 配置失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
   log "Rainbow 初始化完成"
-}
-
-reset_rainbow() {
-  uninstall_rainbow || return 1
-  install_rainbow_command
-  exec "$RAINBOW_BIN"
 }
 
 random_hex() {
@@ -2764,11 +2756,6 @@ main() {
 
     if [[ "$ACTION" == "uninstall" ]]; then
       uninstall_rainbow && exit
-      pause_menu
-      continue
-    fi
-    if [[ "$ACTION" == "initialize" ]]; then
-      reset_rainbow || true
       pause_menu
       continue
     fi

@@ -16,7 +16,7 @@ rb
 `{前缀名称}-Rainbow-{协议}`，例如 `vps01-Rainbow-XHTTP`；WARP 节点会额外追加
 `-WARP`。
 
-首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。WARP 注册会自动接受 [Cloudflare 服务条款](https://www.cloudflare.com/application/terms/)。主菜单中的 `一键初始化` 会先卸载 Rainbow 管理的全部数据，再重新执行上述初始化。
+首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。WARP 注册会自动接受 [Cloudflare 服务条款](https://www.cloudflare.com/application/terms/)。
 
 通过 rainbow 安装的程序和配置位于：
 
