@@ -203,6 +203,7 @@ select_action() {
     '2) 搭建 X-ray 节点' \
     '3) 搭建 sing-box 节点' \
     '5) 证书管理' \
+    '6) 编辑节点' \
     '7) 设置节点名称前缀' \
     '8) 卸载节点' \
     '99) 一键卸载' \
@@ -210,17 +211,18 @@ select_action() {
     ''
 
   while true; do
-    read -r -p '请输入 [0/1/2/3/5/7/8/99]：' choice
+    read -r -p '请输入 [0/1/2/3/5/6/7/8/99]：' choice
     case "$choice" in
       1) ACTION="show-nodes"; return ;;
       2) ACTION="xray-node"; return ;;
       3) ACTION="sing-box-node"; return ;;
       5) ACTION="tls"; return ;;
+      6) ACTION="edit-node"; return ;;
       7) ACTION="node-prefix"; return ;;
       8) ACTION="remove-nodes"; return ;;
       99) ACTION="uninstall"; return ;;
       0) exit ;;
-      *) printf '无效选项，请输入 0、1、2、3、5、7、8 或 99。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2、3、5、6、7、8 或 99。\n' >&2 ;;
     esac
   done
 }
@@ -1612,6 +1614,205 @@ discover_removable_nodes() {
   fi
 }
 
+get_managed_node_port() {
+  local engine=$1 type=$2 tag
+
+  if [[ "$engine" == "Xray" ]]; then
+    tag="rainbow-vless-${type}"
+    jq -er --arg tag "$tag" \
+      'first(.inbounds[] | select(.tag == $tag) | .port)' \
+      "$XRAY_HOME/config.json"
+  else
+    tag="rainbow-${type}"
+    jq -er --arg tag "$tag" \
+      'first(.inbounds[] | select(.tag == $tag) | .listen_port)' \
+      "$SING_BOX_HOME/config.json"
+  fi
+}
+
+read_edited_node_port() {
+  local current_port=$1 input port protocol=$2 type=$3
+
+  while true; do
+    read -r -p "请输入新端口（当前 ${current_port}，直接回车取消）：" input
+    [[ -n "$input" ]] || return 1
+    if [[ ! "$input" =~ ^[0-9]+$ || ${#input} -gt 5 ]]; then
+      printf '端口必须是 1 到 65535 之间的整数。\n' >&2
+      continue
+    fi
+    port=$((10#$input))
+    if ((port < 1 || port > 65535)); then
+      printf '端口必须是 1 到 65535 之间的整数。\n' >&2
+    elif ((port == current_port)); then
+      printf '新端口与当前端口相同。\n' >&2
+    elif [[ "$type" == "ws" ]] && ! valid_cf_https_port "$port"; then
+      printf '仅支持 Cloudflare HTTPS 端口：443、2053、2083、2087、2096、8443。\n' >&2
+    elif port_in_use "$port" "$protocol"; then
+      printf '端口 %s 已被占用。\n' "$port" >&2
+    else
+      EDIT_NODE_PORT=$port
+      return
+    fi
+  done
+}
+
+write_edited_client_port() {
+  local client_file=$1 current_port=$2 new_port=$3 output=$4
+
+  [[ -s "$client_file" ]] || return 1
+  awk -v old_port="$current_port" -v new_port="$new_port" '
+    /^端口：/ { $0 = "端口：" new_port }
+    /^分享链接：/ { gsub(":" old_port, ":" new_port) }
+    { print }
+  ' "$client_file" > "$output"
+  grep -q '^分享链接：' "$output"
+}
+
+edit_node_port() {
+  local engine=$1 type=$2 current_port=$3 new_port=$4 apply_failed=0
+  local backup_file client_backup="" client_file="" client_output=""
+  local config_file config_output service tag
+
+  if [[ "$engine" == "Xray" ]]; then
+    config_file="$XRAY_HOME/config.json"
+    config_output="$TMP_DIR/edit-xray-node.json"
+    service="$XRAY_SERVICE"
+    tag="rainbow-vless-${type}"
+    jq --arg tag "$tag" --argjson port "$new_port" '
+      .inbounds |= map(if .tag == $tag then .port = $port else . end)
+    ' "$config_file" > "$config_output" \
+      && "$XRAY_HOME/xray" run -test -config "$config_output" || {
+        printf '修改后的 Xray 配置验证失败，原配置未修改。\n' >&2
+        return 1
+      }
+  else
+    config_file="$SING_BOX_HOME/config.json"
+    config_output="$TMP_DIR/edit-sing-box-node.json"
+    service="$SING_BOX_SERVICE"
+    tag="rainbow-${type}"
+    jq --arg tag "$tag" --argjson port "$new_port" '
+      .inbounds |= map(if .tag == $tag then .listen_port = $port else . end)
+    ' "$config_file" > "$config_output" \
+      && "$SING_BOX_HOME/sing-box" check -c "$config_output" || {
+        printf '修改后的 sing-box 配置验证失败，原配置未修改。\n' >&2
+        return 1
+      }
+  fi
+
+  if [[ "$type" != "ws-tunnel" && "$type" != "ws-named-tunnel" ]]; then
+    if [[ "$engine" == "Xray" ]]; then
+      client_file="$XRAY_HOME/client-${type}.txt"
+    else
+      client_file="$SING_BOX_HOME/client-${type}.txt"
+    fi
+    client_output="$TMP_DIR/edit-node-client.txt"
+    write_edited_client_port "$client_file" "$current_port" "$new_port" \
+      "$client_output" || {
+        printf '节点客户端信息缺失或格式错误，原配置未修改。\n' >&2
+        return 1
+      }
+  fi
+
+  backup_file=$(mktemp "${config_file}.backup.XXXXXX")
+  install -m 0600 "$config_file" "$backup_file" || return 1
+  if [[ -n "$client_file" ]]; then
+    client_backup=$(mktemp "${client_file}.backup.XXXXXX")
+    install -m 0600 "$client_file" "$client_backup" || return 1
+  fi
+
+  install -m 0600 "$config_output" "$config_file" || apply_failed=1
+  if [[ "$apply_failed" == "0" && -n "$client_file" ]]; then
+    install -m 0600 "$client_output" "$client_file" || apply_failed=1
+    if [[ "$apply_failed" == "0" ]]; then
+      if [[ "$engine" == "Xray" ]]; then
+        refresh_xray_client_info || apply_failed=1
+      else
+        refresh_sing_box_client_info || apply_failed=1
+      fi
+    fi
+  fi
+  if [[ "$apply_failed" == "0" ]] && ! systemctl restart "$service"; then
+    apply_failed=1
+  fi
+  if [[ "$apply_failed" == "0" && "$type" == "ws-tunnel" ]]; then
+    NODE_PORT=$new_port
+    NODE_ADDRESS=""
+    [[ ! -s "$CLOUDFLARED_ADDRESS_FILE" ]] \
+      || IFS= read -r NODE_ADDRESS < "$CLOUDFLARED_ADDRESS_FILE"
+    setup_quick_tunnel_service || apply_failed=1
+  fi
+
+  if [[ "$apply_failed" == "1" ]]; then
+    install -m 0600 "$backup_file" "$config_file" || true
+    if [[ -n "$client_backup" ]]; then
+      install -m 0600 "$client_backup" "$client_file" || true
+      if [[ "$engine" == "Xray" ]]; then
+        refresh_xray_client_info || true
+      else
+        refresh_sing_box_client_info || true
+      fi
+    fi
+    systemctl restart "$service" || true
+    if [[ "$type" == "ws-tunnel" ]]; then
+      systemctl daemon-reload || true
+      systemctl restart "$CLOUDFLARED_SERVICE" || true
+    fi
+    printf '节点端口修改失败，已恢复原配置。\n' >&2
+    return 1
+  fi
+
+  if [[ "$type" == "ws-named-tunnel" ]]; then
+    printf '请将 Cloudflare Tunnel Published application 的 Service 修改为：\n'
+    printf '  http://127.0.0.1:%s\n' "$new_port"
+  fi
+  log "节点端口已从 ${current_port} 修改为 ${new_port}"
+}
+
+manage_node_edit() {
+  local current_port engine index input protocol type
+
+  clear_screen
+  show_header '编辑节点'
+  discover_removable_nodes || return 1
+  if ((REMOVE_NODE_COUNT == 0)); then
+    printf '当前没有 Rainbow 管理的节点。\n'
+    return
+  fi
+
+  printf '可编辑节点：\n'
+  for ((index = 0; index < REMOVE_NODE_COUNT; index++)); do
+    current_port=$(get_managed_node_port "${REMOVE_NODE_ENGINES[index]}" \
+      "${REMOVE_NODE_TYPES[index]}") || return 1
+    printf '%d) %-8s %s（端口：%s）\n' "$((index + 1))" \
+      "${REMOVE_NODE_ENGINES[index]}" "${REMOVE_NODE_LABELS[index]}" "$current_port"
+  done
+  read -r -p '请输入要编辑的节点序号：' input
+  [[ "$input" =~ ^[0-9]+$ && ${#input} -le 3 ]] || {
+    printf '序号格式错误。\n' >&2
+    return 1
+  }
+  index=$((10#$input))
+  ((index >= 1 && index <= REMOVE_NODE_COUNT)) || {
+    printf '序号超出范围。\n' >&2
+    return 1
+  }
+  index=$((index - 1))
+  engine=${REMOVE_NODE_ENGINES[index]}
+  type=${REMOVE_NODE_TYPES[index]}
+  current_port=$(get_managed_node_port "$engine" "$type") || return 1
+  protocol="tcp"
+  [[ "$type" != "tuic" && "$type" != "hysteria2" ]] || protocol="udp"
+  command -v ss >/dev/null 2>&1 || {
+    printf '编辑节点需要 ss 命令。\n' >&2
+    return 1
+  }
+  read_edited_node_port "$current_port" "$protocol" "$type" || {
+    printf '已取消编辑。\n'
+    return
+  }
+  edit_node_port "$engine" "$type" "$current_port" "$EDIT_NODE_PORT"
+}
+
 parse_node_selection() {
   local index normalized=${1//,/ } selected=" " token max=$2
 
@@ -2765,6 +2966,11 @@ main() {
     fi
     if [[ "$ACTION" == "remove-nodes" ]]; then
       manage_node_removal || true
+      pause_menu
+      continue
+    fi
+    if [[ "$ACTION" == "edit-node" ]]; then
+      manage_node_edit || true
       pause_menu
       continue
     fi
