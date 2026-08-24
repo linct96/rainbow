@@ -180,16 +180,16 @@ configure_node_prefix() {
 
 show_tls_status() {
   local domain="-" self_signed_status acme_status
-  if valid_self_signed_certificate; then
-    self_signed_status="有效"
+  if [[ -s "$SELF_SIGNED_TLS_CERT" && -s "$SELF_SIGNED_TLS_KEY" ]]; then
+    self_signed_status="已配置"
   elif [[ -e "$SELF_SIGNED_TLS_CERT" || -e "$SELF_SIGNED_TLS_KEY" ]]; then
     self_signed_status="状态异常"
   else
     self_signed_status="未配置"
   fi
   [[ -s "$TLS_DOMAIN_FILE" ]] && IFS= read -r domain < "$TLS_DOMAIN_FILE"
-  if valid_acme_certificate; then
-    acme_status="${domain}，有效"
+  if [[ -s "$ACME_TLS_CERT" && -s "$ACME_TLS_KEY" ]]; then
+    acme_status="${domain}，已配置"
   elif [[ -e "$ACME_TLS_CERT" || -e "$ACME_TLS_KEY" ]]; then
     acme_status="${domain}，状态异常"
   else
