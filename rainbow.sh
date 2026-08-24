@@ -202,27 +202,27 @@ select_action() {
     '1) 查看所有节点' \
     '2) 搭建 X-ray 节点' \
     '3) 搭建 sing-box 节点' \
-    '5) 证书管理' \
-    '6) 编辑节点' \
+    '4) 编辑节点' \
+    '5) 卸载节点' \
+    '6) 证书管理' \
     '7) 设置节点名称前缀' \
-    '8) 卸载节点' \
     '99) 一键卸载' \
     '0) 退出脚本' \
     ''
 
   while true; do
-    read -r -p '请输入 [0/1/2/3/5/6/7/8/99]：' choice
+    read -r -p '请输入 [0/1/2/3/4/5/6/7/99]：' choice
     case "$choice" in
       1) ACTION="show-nodes"; return ;;
       2) ACTION="xray-node"; return ;;
       3) ACTION="sing-box-node"; return ;;
-      5) ACTION="tls"; return ;;
-      6) ACTION="edit-node"; return ;;
+      4) ACTION="edit-node"; return ;;
+      5) ACTION="remove-nodes"; return ;;
+      6) ACTION="tls"; return ;;
       7) ACTION="node-prefix"; return ;;
-      8) ACTION="remove-nodes"; return ;;
       99) ACTION="uninstall"; return ;;
       0) exit ;;
-      *) printf '无效选项，请输入 0、1、2、3、5、6、7、8 或 99。\n' >&2 ;;
+      *) printf '无效选项，请输入 0、1、2、3、4、5、6、7 或 99。\n' >&2 ;;
     esac
   done
 }
