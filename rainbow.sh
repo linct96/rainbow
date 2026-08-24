@@ -140,7 +140,6 @@ show_installation_status() {
   elif systemctl cat "$CLOUDFLARED_SERVICE" >/dev/null 2>&1; then
     tunnel_status="未运行"
   fi
-  printf '  %-8s %s\n' '临时隧道' "$tunnel_status"
   if systemctl is-active --quiet "$CLOUDFLARED_NAMED_SERVICE"; then
     named_tunnel_status="运行中"
     [[ ! -s "$CLOUDFLARED_NAMED_HOST_FILE" ]] \
@@ -148,7 +147,8 @@ show_installation_status() {
   elif systemctl cat "$CLOUDFLARED_NAMED_SERVICE" >/dev/null 2>&1; then
     named_tunnel_status="未运行"
   fi
-  printf '  %-8s %s\n' '固定隧道' "$named_tunnel_status"
+  printf '  %-8s 临时：%s；固定：%s\n' \
+    '隧道' "$tunnel_status" "$named_tunnel_status"
   show_tls_status
   printf '  %-8s %s\n' '节点前缀' "$(get_node_prefix)"
   printf '\n'
