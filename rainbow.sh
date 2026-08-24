@@ -125,7 +125,7 @@ show_installation_status() {
   local product binary_path named_tunnel_status="未配置" tunnel_status="未配置"
 
   printf '%s\n' '当前安装状态：'
-  for product in sing-box xray cloudflared; do
+  for product in sing-box xray; do
     binary_path="$RAINBOW_HOME/$product/$product"
     if [[ -x "$binary_path" ]]; then
       printf '  %-8s 已安装（路径：%s）\n' "$product" "$binary_path"
@@ -202,9 +202,9 @@ show_tls_status() {
 select_action() {
   printf '%s\n' \
     '请选择操作：' \
-    '1) 搭建 X-ray 节点' \
-    '2) 搭建 sing-box 节点' \
-    '3) 查看所有节点' \
+    '1) 查看所有节点' \
+    '2) 搭建 X-ray 节点' \
+    '3) 搭建 sing-box 节点' \
     '4) 一键卸载' \
     '5) 证书管理' \
     '6) 一键初始化' \
@@ -215,9 +215,9 @@ select_action() {
   while true; do
     read -r -p '请输入 [1/2/3/4/5/6/7/8]：' choice
     case "$choice" in
-      1) ACTION="xray-node"; return ;;
-      2) ACTION="sing-box-node"; return ;;
-      3) ACTION="show-nodes"; return ;;
+      1) ACTION="show-nodes"; return ;;
+      2) ACTION="xray-node"; return ;;
+      3) ACTION="sing-box-node"; return ;;
       4) ACTION="uninstall"; return ;;
       5) ACTION="tls"; return ;;
       6) ACTION="initialize"; return ;;
