@@ -813,6 +813,29 @@ select_warp_mode() {
   done
 }
 
+select_vless_encryption() {
+  local choice
+
+  VLESS_ENCRYPTION_ENABLED=0
+  NODE_ENCRYPTION="none"
+  NODE_DECRYPTION="none"
+  [[ "$NODE_TYPE" == ws* ]] || return
+  printf '%s\n' \
+    '' \
+    '是否启用 VLESS ENC：' \
+    '1) 不启用（默认，兼容性最好）' \
+    '2) 启用（仅支持新版 Xray 内核客户端）' \
+    ''
+  while true; do
+    read -r -p '请输入 [1/2]（直接回车选择 1）：' choice
+    case "${choice:-1}" in
+      1) return ;;
+      2) VLESS_ENCRYPTION_ENABLED=1; return ;;
+      *) printf '无效选项，请输入 1 或 2。\n' >&2 ;;
+    esac
+  done
+}
+
 install_wgcf() {
   local release_json tag version asset_name asset_url expected actual
 
@@ -958,7 +981,7 @@ ensure_warp_profile() {
 }
 
 generate_xray_credentials() {
-  local key_output
+  local encryption_output key_output
 
   NODE_UUID=$("$XRAY_HOME/xray" uuid)
   NODE_WARP_UUID=""
@@ -969,6 +992,15 @@ generate_xray_credentials() {
     NODE_PRIVATE_KEY=""
     NODE_PUBLIC_KEY=""
     NODE_SHORT_ID=""
+    if [[ "${VLESS_ENCRYPTION_ENABLED:-0}" == "1" ]]; then
+      encryption_output=$("$XRAY_HOME/xray" vlessenc) || return 1
+      NODE_DECRYPTION=$(awk -F '"' '/"decryption"/ { value=$4 } END { print value }' \
+        <<<"$encryption_output")
+      NODE_ENCRYPTION=$(awk -F '"' '/"encryption"/ { value=$4 } END { print value }' \
+        <<<"$encryption_output")
+      [[ "$NODE_DECRYPTION" == mlkem768x25519plus.* \
+        && "$NODE_ENCRYPTION" == mlkem768x25519plus.* ]] || return 1
+    fi
     [[ "$NODE_UUID" =~ ^[0-9a-fA-F-]{36}$ \
       && ( -z "$NODE_WARP_UUID" || "$NODE_WARP_UUID" =~ ^[0-9a-fA-F-]{36}$ ) ]]
     return
@@ -1005,6 +1037,7 @@ write_xray_node_config() {
     --arg uuid "$NODE_UUID" \
     --arg warp_uuid "$NODE_WARP_UUID" \
     --arg warp_mode "$WARP_MODE" \
+    --arg decryption "${NODE_DECRYPTION:-none}" \
     --arg flow "$flow" \
     --arg listen "$listen" \
     --arg network "$network" \
@@ -1066,7 +1099,7 @@ write_xray_node_config() {
           protocol: "vless",
           settings: {
             clients: node_clients,
-            decryption: "none"
+            decryption: $decryption
           },
           streamSettings: (
             {network: $network, security: $security}
@@ -1141,9 +1174,11 @@ write_xray_node_config() {
 }
 
 write_xray_client_block() {
-  local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_label encoded_path uri
+  local client_file=$1 uuid=$2 label=$3 outbound=$4 encoded_encryption
+  local encoded_label encoded_path uri
 
   encoded_label=$(jq -rn --arg value "$label" '$value | @uri')
+  encoded_encryption=$(jq -rn --arg value "${NODE_ENCRYPTION:-none}" '$value | @uri')
 
   case "$NODE_TYPE" in
     xhttp)
@@ -1155,11 +1190,11 @@ write_xray_client_block() {
       ;;
     ws)
       encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=${encoded_encryption}&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
       ;;
     ws-tunnel | ws-named-tunnel)
       encoded_path=$(jq -rn --arg value "$NODE_PATH" '$value | @uri')
-      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=none&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
+      uri="vless://${uuid}@${NODE_ADDRESS}:${NODE_PORT}?encryption=${encoded_encryption}&security=tls&sni=${NODE_SERVER_NAME}&fp=chrome&type=ws&host=${NODE_SERVER_NAME}&path=${encoded_path}#${encoded_label}"
       ;;
   esac
 
@@ -1172,6 +1207,8 @@ write_xray_client_block() {
     printf '%s\n' \
       "服务域名：$NODE_SERVER_NAME" \
       "WebSocket 路径：$NODE_PATH" \
+      "VLESS ENC：$([[ "${NODE_ENCRYPTION:-none}" == "none" ]] \
+        && printf '未启用' || printf '已启用')" \
       "UUID：$uuid" >> "$client_file"
   else
     printf '%s\n' \
@@ -1182,6 +1219,27 @@ write_xray_client_block() {
       "Short ID：$NODE_SHORT_ID" >> "$client_file"
   fi
   printf '分享链接：%s\n' "$uri" >> "$client_file"
+}
+
+save_vless_encryption_state() {
+  local file="$XRAY_HOME/client-${NODE_TYPE}.enc"
+
+  if [[ "${NODE_ENCRYPTION:-none}" == "none" ]]; then
+    rm -f "$file"
+  else
+    install -m 0600 /dev/null "$file"
+    printf '%s\n' "$NODE_ENCRYPTION" > "$file"
+  fi
+}
+
+restore_vless_encryption_state() {
+  local backup=$1 existed=$2 file=$3
+
+  if [[ "$existed" == "1" ]]; then
+    install -m 0600 "$backup" "$file"
+  else
+    rm -f "$file"
+  fi
 }
 
 save_xray_client_info() {
@@ -1262,6 +1320,9 @@ refresh_quick_tunnel_client() {
   [[ ! -s "$CLOUDFLARED_ADDRESS_FILE" ]] \
     || IFS= read -r preferred_address < "$CLOUDFLARED_ADDRESS_FILE"
   NODE_TYPE="ws-tunnel"
+  NODE_ENCRYPTION="none"
+  [[ ! -s "$XRAY_HOME/client-${NODE_TYPE}.enc" ]] \
+    || IFS= read -r NODE_ENCRYPTION < "$XRAY_HOME/client-${NODE_TYPE}.enc"
   NODE_ADDRESS=${preferred_address:-$hostname}
   NODE_PORT=443
   NODE_SERVER_NAME=$hostname
@@ -1443,6 +1504,8 @@ verify_named_tunnel_route() {
 
 setup_xray_node() {
   local backup_file config_file="$TMP_DIR/xray-node-config.json"
+  local encryption_backup="$TMP_DIR/vless-encryption.backup"
+  local encryption_existed=0 encryption_file=""
   local service_file="/etc/systemd/system/${XRAY_SERVICE}.service"
 
   if [[ ! -x "$XRAY_HOME/xray" || ! -f "$XRAY_HOME/config.json" \
@@ -1461,6 +1524,7 @@ setup_xray_node() {
   fi
 
   select_warp_mode
+  select_vless_encryption
   if [[ "$WARP_MODE" != "direct" ]]; then
     command -v getent >/dev/null 2>&1 || {
       printf '搭建 Xray WARP 节点需要 getent 命令。\n' >&2
@@ -1489,9 +1553,24 @@ setup_xray_node() {
 
   backup_file=$(mktemp "$XRAY_HOME/config.json.backup.XXXXXX")
   install -m 0600 "$XRAY_HOME/config.json" "$backup_file"
+  if [[ "$NODE_TYPE" == ws* ]]; then
+    encryption_file="$XRAY_HOME/client-${NODE_TYPE}.enc"
+    if [[ -f "$encryption_file" ]]; then
+      install -m 0600 "$encryption_file" "$encryption_backup"
+      encryption_existed=1
+    fi
+    save_vless_encryption_state || {
+      restore_vless_encryption_state "$encryption_backup" "$encryption_existed" \
+        "$encryption_file"
+      return 1
+    }
+  fi
   install -m 0600 "$config_file" "$XRAY_HOME/config.json"
   if ! systemctl restart "$XRAY_SERVICE"; then
     install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
+    [[ -z "$encryption_file" ]] \
+      || restore_vless_encryption_state "$encryption_backup" "$encryption_existed" \
+        "$encryption_file"
     systemctl restart "$XRAY_SERVICE" || true
     printf 'Xray 启动失败，已恢复原配置：%s\n' "$backup_file" >&2
     return 1
@@ -1501,6 +1580,8 @@ setup_xray_node() {
   if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
     if ! setup_quick_tunnel_service; then
       install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
+      restore_vless_encryption_state "$encryption_backup" "$encryption_existed" \
+        "$encryption_file"
       systemctl restart "$XRAY_SERVICE" || true
       systemctl restart "$CLOUDFLARED_SERVICE" >/dev/null 2>&1 || true
       printf 'Cloudflare 临时隧道启动失败，已恢复原 Xray 配置。\n' >&2
@@ -1514,6 +1595,8 @@ setup_xray_node() {
   if [[ "$NODE_TYPE" == "ws-named-tunnel" ]]; then
     if ! setup_named_tunnel_service; then
       install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
+      restore_vless_encryption_state "$encryption_backup" "$encryption_existed" \
+        "$encryption_file"
       systemctl restart "$XRAY_SERVICE" || true
       printf 'Cloudflare 固定隧道启动失败，已恢复原 Xray 配置。\n' >&2
       return 1
@@ -1978,7 +2061,7 @@ remove_selected_nodes() {
   fi
 
   for type in ${xray_types[@]+"${xray_types[@]}"}; do
-    rm -f "$XRAY_HOME/client-${type}.txt"
+    rm -f "$XRAY_HOME/client-${type}.txt" "$XRAY_HOME/client-${type}.enc"
   done
   for type in ${sing_types[@]+"${sing_types[@]}"}; do
     rm -f "$SING_BOX_HOME/client-${type}.txt"

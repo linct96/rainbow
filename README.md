@@ -110,6 +110,8 @@ SSL/TLS 模式：Full (strict)
 journalctl -u rainbow-acme.service
 ```
 
+创建 VLESS + WebSocket 节点时可选启用 VLESS ENC。默认关闭以保持客户端兼容性；启用后使用 Xray 生成的 ML-KEM-768 加密对，仅支持新版 Xray 内核客户端。
+
 ## VLESS + WebSocket + Cloudflare Argo 隧道
 
 Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-Rainbow-ARGO`，WARP 节点追加 `-WARP`。
