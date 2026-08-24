@@ -98,9 +98,9 @@ detect_arch() {
 }
 
 install_rainbow_command() {
-  local source_file=${BASH_SOURCE[0]} action="安装"
+  local action="安装"
 
-  if [[ -e "$RAINBOW_BIN" && "$source_file" -ef "$RAINBOW_BIN" ]]; then
+  if [[ -e "$RAINBOW_BIN" && "$0" -ef "$RAINBOW_BIN" ]]; then
     return
   fi
 
@@ -2819,6 +2819,4 @@ run_command() {
   esac
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-  run_command "$@"
-fi
+run_command "$@"
