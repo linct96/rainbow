@@ -688,7 +688,7 @@ resolve_xray_cli_node_details() {
       [[ "$NODE_TYPE" != "xhttp" ]] || NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
       ;;
     ws)
-      NODE_SERVER_NAME=$NODE_ADDRESS
+      NODE_ADDRESS=${NODE_ADDRESS:-$NODE_SERVER_NAME}
       openssl x509 -in "$ACME_TLS_CERT" -noout -checkhost "$NODE_SERVER_NAME" \
         >/dev/null || {
           xray_cli_error "当前 ACME 证书不包含域名：$NODE_SERVER_NAME"
@@ -718,7 +718,7 @@ resolve_xray_cli_node_details() {
         xray_cli_error 'Cloudflare Tunnel Token 文件为空。'
         return
       }
-      NODE_SERVER_NAME=$NODE_ADDRESS
+      NODE_ADDRESS=${NODE_ADDRESS:-$NODE_SERVER_NAME}
       NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
       ;;
   esac
@@ -3213,7 +3213,8 @@ show_xray_cli_help() {
 
 选项：
   --port <端口>                  省略时随机生成
-  --address <IP或域名>          CDN 和固定 ARGO 必填完整域名
+  --domain <完整域名>           CDN 和固定 ARGO 的 TLS SNI / WebSocket Host
+  --address <IP或域名>          优选连接地址，省略时使用服务器域名
   --warp <direct|both|warp>      默认 direct
   --sni <域名>                  REALITY 伪装域名，省略时按地区自动选择
   --path <路径>                 XHTTP、CDN 或 ARGO 路径，省略时随机生成
@@ -3239,16 +3240,18 @@ parse_xray_add_options() {
   NODE_PATH=""
   NODE_TUNNEL_TOKEN=""
   NODE_TUNNEL_TOKEN_FILE=""
+  XRAY_CLI_SNI=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --port | --address | --warp | --sni | --path | --token-file)
+      --port | --domain | --address | --warp | --sni | --path | --token-file)
         [[ $# -ge 2 ]] || { xray_cli_error "缺少 $1 参数。"; return; }
         case "$1" in
           --port) NODE_PORT=$2 ;;
+          --domain) NODE_SERVER_NAME=$2 ;;
           --address) NODE_ADDRESS=$2 ;;
           --warp) WARP_MODE=$2 ;;
-          --sni) NODE_SERVER_NAME=$2 ;;
+          --sni) XRAY_CLI_SNI=$2 ;;
           --path) NODE_PATH=$2 ;;
           --token-file) NODE_TUNNEL_TOKEN_FILE=$2 ;;
         esac
@@ -3277,34 +3280,42 @@ parse_xray_add_options() {
   }
   case "$XRAY_CLI_TYPE" in
     xhttp)
-      [[ -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
-        || { xray_cli_error 'XHTTP 不支持 Tunnel Token。'; return; }
-      [[ -z "$NODE_SERVER_NAME" ]] || valid_domain "$NODE_SERVER_NAME" \
+      [[ -z "$NODE_SERVER_NAME" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+        || { xray_cli_error 'XHTTP 不支持 --domain 或 Tunnel Token。'; return; }
+      [[ -z "$XRAY_CLI_SNI" ]] || valid_domain "$XRAY_CLI_SNI" \
         || { xray_cli_error 'REALITY 伪装域名格式错误。'; return; }
+      NODE_SERVER_NAME=$XRAY_CLI_SNI
       ;;
     tcp)
-      [[ -z "$NODE_PATH" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
-        || { xray_cli_error 'TCP 不支持路径或 Tunnel Token。'; return; }
-      [[ -z "$NODE_SERVER_NAME" ]] || valid_domain "$NODE_SERVER_NAME" \
+      [[ -z "$NODE_PATH" && -z "$NODE_SERVER_NAME" \
+        && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+        || { xray_cli_error 'TCP 不支持路径、--domain 或 Tunnel Token。'; return; }
+      [[ -z "$XRAY_CLI_SNI" ]] || valid_domain "$XRAY_CLI_SNI" \
         || { xray_cli_error 'REALITY 伪装域名格式错误。'; return; }
+      NODE_SERVER_NAME=$XRAY_CLI_SNI
       ;;
     cdn)
-      [[ -z "$NODE_SERVER_NAME" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+      [[ -z "$XRAY_CLI_SNI" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
         || { xray_cli_error 'CDN 不支持 --sni 或 Tunnel Token。'; return; }
       [[ -z "$NODE_PORT" ]] || valid_cf_https_port "$NODE_PORT" \
         || { xray_cli_error 'CDN 端口仅支持 443、2053、2083、2087、2096、8443。'; return; }
-      valid_domain "$NODE_ADDRESS" \
-        || { xray_cli_error 'CDN 必须通过 --address 指定完整域名。'; return; }
+      valid_domain "$NODE_SERVER_NAME" \
+        || { xray_cli_error 'CDN 必须通过 --domain 指定完整服务器域名。'; return; }
+      [[ -z "$NODE_ADDRESS" ]] || valid_domain "$NODE_ADDRESS" \
+        || { xray_cli_error 'CDN 优选地址必须是域名。'; return; }
       ;;
     argo)
-      [[ -z "$NODE_SERVER_NAME" ]] \
+      [[ -z "$XRAY_CLI_SNI" ]] \
         || { xray_cli_error 'ARGO 不支持 --sni。'; return; }
       if [[ -n "$NODE_TUNNEL_TOKEN_FILE" ]]; then
         [[ -r "$NODE_TUNNEL_TOKEN_FILE" && -s "$NODE_TUNNEL_TOKEN_FILE" ]] \
           || { xray_cli_error 'Tunnel Token 文件不存在、不可读或为空。'; return; }
-        valid_domain "$NODE_ADDRESS" \
-          || { xray_cli_error '固定 ARGO 必须通过 --address 指定完整域名。'; return; }
+        valid_domain "$NODE_SERVER_NAME" \
+          || { xray_cli_error '固定 ARGO 必须通过 --domain 指定完整服务器域名。'; return; }
         NODE_TYPE="ws-named-tunnel"
+      elif [[ -n "$NODE_SERVER_NAME" ]]; then
+        xray_cli_error '临时 ARGO 不支持 --domain；固定隧道需提供 --token-file。'
+        return
       fi
       [[ -z "$NODE_ADDRESS" ]] || valid_domain "$NODE_ADDRESS" \
         || { xray_cli_error 'ARGO 优选地址必须是域名。'; return; }
