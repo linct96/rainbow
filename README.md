@@ -149,7 +149,7 @@ journalctl -u rainbow-acme.service
 
 ## VLESS + WebSocket + Cloudflare Tunnel
 
-Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-Tunnel`，WARP 节点追加 `-WARP`。
+Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-TUNNEL`，WARP 节点追加 `-WARP`。
 
 脚本会安装独立的 `cloudflared`，并创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站。客户端固定连接 `443` 端口，可以另外输入优选域名作为连接地址。
 

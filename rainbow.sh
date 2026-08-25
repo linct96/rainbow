@@ -1368,7 +1368,7 @@ save_xray_client_info() {
     xhttp) label="${prefix}-XHTTP" ;;
     tcp) label="${prefix}-TCP" ;;
     ws) label="${prefix}-CDN" ;;
-    ws-tunnel | ws-named-tunnel) label="${prefix}-Tunnel" ;;
+    ws-tunnel | ws-named-tunnel) label="${prefix}-TUNNEL" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1442,7 +1442,7 @@ refresh_quick_tunnel_client() {
     | .streamSettings.wsSettings.path
   ' "$XRAY_HOME/config.json")
   prefix=$(get_node_prefix)
-  label="${prefix}-Tunnel"
+  label="${prefix}-TUNNEL"
   install -m 0600 /dev/null "$client_file"
 
   while IFS=$'\t' read -r uuid email; do
