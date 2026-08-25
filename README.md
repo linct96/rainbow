@@ -6,6 +6,12 @@
 bash <(curl -Ls https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh)
 ```
 
+仅完成初始化安装并注册 `rb` 命令，不进入交互菜单：
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.sh) --install
+```
+
 首次执行后会安装为 `/usr/local/bin/rb`，后续直接运行：
 
 ```bash

@@ -3022,7 +3022,7 @@ init_temp_dir() {
   trap 'rm -rf "$TMP_DIR"' EXIT
 }
 
-main() {
+prepare_rainbow() {
   require_root
   require_commands
   init_temp_dir
@@ -3031,6 +3031,10 @@ main() {
   migrate_legacy_tls_layout || die "迁移 TLS 证书失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
   rainbow_is_initialized || initialize_rainbow
+}
+
+main() {
+  prepare_rainbow
 
   while true; do
     clear_screen
@@ -3079,6 +3083,10 @@ main() {
 
 run_command() {
   case "${1:-}" in
+    --install)
+      prepare_rainbow
+      printf 'Rainbow 初始化安装完成，后续可直接运行 rb。\n'
+      ;;
     acme-renew)
       require_root
       require_commands
