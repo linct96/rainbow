@@ -735,6 +735,18 @@ valid_domain_prefix() {
     && "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
 }
 
+read_websocket_path() {
+  local input
+
+  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
+  NODE_PATH=${input:-/$(random_hex 4)}
+  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
+  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
+    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
+    return 1
+  }
+}
+
 read_ws_node_details() {
   local input root_domain
 
@@ -785,13 +797,7 @@ read_ws_node_details() {
     "客户端连接地址：$NODE_ADDRESS" \
     "TLS SNI / WebSocket Host：$NODE_SERVER_NAME"
 
-  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
-  NODE_PATH=${input:-/$(random_hex 4)}
-  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
-  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
-    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
-    return 1
-  }
+  read_websocket_path || return
   printf '%s\n' \
     "WebSocket 路径：$NODE_PATH" \
     '' \
@@ -810,13 +816,7 @@ read_quick_tunnel_node_details() {
 
   read_node_port || return
   NODE_SERVER_NAME=""
-  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
-  NODE_PATH=${input:-/$(random_hex 4)}
-  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
-  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
-    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
-    return 1
-  }
+  read_websocket_path || return
 
   while true; do
     read -r -p '请输入优选域名（直接回车使用临时隧道域名）：' input
@@ -882,13 +882,7 @@ read_named_tunnel_node_details() {
     printf '子域名前缀只能包含小写字母、数字和连字符，且不能以连字符开头或结尾。\n' >&2
   done
 
-  read -r -p '请输入 WebSocket 路径（直接回车随机生成）：' input
-  NODE_PATH=${input:-/$(random_hex 4)}
-  [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
-  [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] || {
-    printf 'WebSocket 路径只能包含字母、数字、/、-、_、. 和 ~。\n' >&2
-    return 1
-  }
+  read_websocket_path || return
 
   while true; do
     read -r -p "请输入优选域名（直接回车使用 ${NODE_SERVER_NAME}）：" input
