@@ -33,6 +33,9 @@ rb sing-box remove hysteria2 --yes
 `--warp` 支持 `direct`、`both` 和 `warp`，默认为 `direct`。删除节点需要输入
 `DELETE` 确认，自动化场景可使用 `--yes` 跳过确认。
 
+脚本日志使用绿色 `[INFO]`、黄色 `[WARN]` 和红色 `[ERROR]` 标签。非交互输出不包含颜色，
+可通过 `NO_COLOR=1` 强制关闭颜色。
+
 首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。
 
 通过 rainbow 安装的程序和配置位于：

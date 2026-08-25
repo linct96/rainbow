@@ -53,12 +53,34 @@ SING_BOX_TLS_KEY="$SELF_SIGNED_TLS_KEY"
 SING_BOX_TLS_IS_PUBLIC=0
 SING_BOX_TLS_SERVER_NAME="$SELF_SIGNED_TLS_SERVER_NAME"
 
-log() {
-  printf '[安装] %s\n' "$*"
+INFO_COLOR=""
+INFO_RESET_COLOR=""
+WARN_COLOR=""
+WARN_RESET_COLOR=""
+ERROR_COLOR=""
+ERROR_RESET_COLOR=""
+if [[ -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
+  [[ -t 1 ]] && INFO_COLOR=$'\033[32m' && INFO_RESET_COLOR=$'\033[0m'
+  [[ -t 2 ]] && WARN_COLOR=$'\033[33m' && ERROR_COLOR=$'\033[31m' \
+    && WARN_RESET_COLOR=$'\033[0m' && ERROR_RESET_COLOR=$'\033[0m'
+fi
+readonly INFO_COLOR INFO_RESET_COLOR WARN_COLOR WARN_RESET_COLOR ERROR_COLOR \
+  ERROR_RESET_COLOR
+
+info() {
+  printf '%s[INFO]%s %s\n' "$INFO_COLOR" "$INFO_RESET_COLOR" "$*"
+}
+
+warn() {
+  printf '%s[WARN]%s %s\n' "$WARN_COLOR" "$WARN_RESET_COLOR" "$*" >&2
+}
+
+error() {
+  printf '%s[ERROR]%s %s\n' "$ERROR_COLOR" "$ERROR_RESET_COLOR" "$*" >&2
 }
 
 die() {
-  printf '[错误] %s\n' "$*" >&2
+  error "$*"
   exit 1
 }
 
@@ -109,7 +131,7 @@ install_rainbow_command() {
   fi
 
   download_rainbow
-  log "rb 命令已${action}：${RAINBOW_BIN}"
+  info "rb 命令已${action}：${RAINBOW_BIN}"
 }
 
 download_rainbow() {
@@ -229,13 +251,13 @@ select_action() {
 
 read_latest_version() {
   local latest_json
-  log "正在查询 ${PRODUCT} 最新版本"
+  info "正在查询 ${PRODUCT} 最新版本"
   latest_json=$(curl --retry 3 -fsSL "https://api.github.com/repos/${REPO}/releases/latest") \
     || die "查询 ${PRODUCT} 最新版本失败"
   VERSION=$(jq -r '.tag_name // empty' <<<"$latest_json")
   [[ -n "$VERSION" ]] || die "未获取到 ${PRODUCT} 最新版本号"
   VERSION_NUMBER="${VERSION#v}"
-  log "准备安装 ${PRODUCT} ${VERSION}"
+  info "准备安装 ${PRODUCT} ${VERSION}"
 }
 
 download() {
@@ -298,7 +320,7 @@ install_sing_box() {
     expected=${digest#sha256:}
     verify_sha256 "$TMP_DIR/$archive_name" "$expected"
   else
-    log "该历史版本未提供 SHA-256，跳过校验"
+    warn "该历史版本未提供 SHA-256，跳过校验"
   fi
 
   tar -xzf "$TMP_DIR/$archive_name" -C "$TMP_DIR"
@@ -395,7 +417,7 @@ install_cloudflared() {
 
   detect_arch
   asset_name="cloudflared-linux-${ARCH}"
-  log '正在查询 cloudflared 最新版本'
+  info '正在查询 cloudflared 最新版本'
   release_json=$(curl --retry 3 -fsSL \
     "https://api.github.com/repos/${CLOUDFLARED_REPO}/releases/latest") \
     || {
@@ -441,7 +463,7 @@ rainbow_is_initialized() {
 
 initialize_rainbow() {
   detect_arch
-  log "开始初始化 Rainbow"
+  info "开始初始化 Rainbow"
 
   PRODUCT="xray"
   REPO="$XRAY_REPO"
@@ -455,7 +477,7 @@ initialize_rainbow() {
 
   ensure_warp_profile || die "初始化 WARP 配置失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
-  log "Rainbow 初始化完成"
+  info "Rainbow 初始化完成"
 }
 
 random_hex() {
@@ -840,7 +862,7 @@ install_wgcf() {
   local release_json tag version asset_name asset_url expected actual
 
   detect_arch
-  log "正在查询 wgcf 最新版本"
+  info "正在查询 wgcf 最新版本"
   release_json=$(curl --retry 3 -fsSL "https://api.github.com/repos/${WGCF_REPO}/releases/latest") || {
     printf '查询 wgcf 最新版本失败。\n' >&2
     return 1
@@ -870,7 +892,7 @@ install_wgcf() {
 
   install -d -m 0700 "$WARP_HOME"
   install -m 0755 "$TMP_DIR/$asset_name" "$WGCF_BIN"
-  log "wgcf ${tag} 已安装"
+  info "wgcf ${tag} 已安装"
 }
 
 read_wgcf_profile_value() {
@@ -967,7 +989,7 @@ ensure_warp_profile() {
       '服务条款：https://www.cloudflare.com/application/terms/'
     "$WGCF_BIN" register --accept-tos --config "$WGCF_ACCOUNT" || {
       [[ -s "$WGCF_ACCOUNT" ]] || return 1
-      log "wgcf 已生成账户，继续验证配置"
+      info "wgcf 已生成账户，继续验证配置"
     }
     chmod 0600 "$WGCF_ACCOUNT"
   fi
@@ -1348,7 +1370,7 @@ refresh_quick_tunnel_client() {
     | .settings.clients[] | [.id, (.email // "")] | @tsv
   ' "$XRAY_HOME/config.json")
   refresh_xray_client_info
-  log "Cloudflare 临时隧道域名：$hostname"
+  info "Cloudflare 临时隧道域名：$hostname"
 }
 
 install_quick_tunnel_service() {
@@ -1576,7 +1598,7 @@ setup_xray_node() {
     return 1
   fi
 
-  log "原配置已备份：$backup_file"
+  info "原配置已备份：$backup_file"
   if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
     if ! setup_quick_tunnel_service; then
       install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
@@ -1604,9 +1626,9 @@ setup_xray_node() {
     NODE_PORT=443
     save_xray_client_info
     if verify_named_tunnel_route; then
-      log '固定隧道 WebSocket 回源验证通过（HTTP 101）'
+      info '固定隧道 WebSocket 回源验证通过（HTTP 101）'
     else
-      printf '固定隧道已启动，但域名路由尚未返回 HTTP 101，请检查 Published application 和 DNS。\n' >&2
+      warn '固定隧道已启动，但域名路由尚未返回 HTTP 101，请检查 Published application 和 DNS。'
     fi
     return
   fi
@@ -1848,7 +1870,7 @@ edit_node_port() {
     printf '请将 Cloudflare Tunnel Published application 的 Service 修改为：\n'
     printf '  http://127.0.0.1:%s\n' "$new_port"
   fi
-  log "节点端口已从 ${current_port} 修改为 ${new_port}"
+  info "节点端口已从 ${current_port} 修改为 ${new_port}"
 }
 
 manage_node_edit() {
@@ -2119,7 +2141,7 @@ manage_node_removal() {
   }
 
   remove_selected_nodes || return 1
-  log "已删除 ${SELECTED_NODE_COUNT} 个节点"
+  info "已删除 ${SELECTED_NODE_COUNT} 个节点"
 }
 
 manage_xray_nodes() {
@@ -2214,7 +2236,7 @@ install_lego() {
 
   [[ -x "$ACME_BIN" ]] && return
   detect_arch
-  log "正在查询 lego 最新版本"
+  info "正在查询 lego 最新版本"
   release_json=$(curl --retry 3 -fsSL \
     "https://api.github.com/repos/${LEGO_REPO}/releases/latest") || return 1
   tag=$(jq -r '.tag_name // empty' <<<"$release_json")
@@ -2232,7 +2254,7 @@ install_lego() {
   tar -xzf "$TMP_DIR/$asset_name" -C "$TMP_DIR" lego
   install -d -m 0700 "$ACME_HOME" "$ACME_DATA_HOME"
   install -m 0755 "$TMP_DIR/lego" "$ACME_BIN"
-  log "lego ${tag} 已安装"
+  info "lego ${tag} 已安装"
 }
 
 run_lego() {
@@ -2442,10 +2464,10 @@ configure_acme_certificate() {
   chmod 0600 "$TLS_DOMAIN_FILE" || return 1
 
   install_acme_timer || {
-    printf '证书已签发，但自动续期定时器安装失败。\n' >&2
+    warn '证书已签发，但自动续期定时器安装失败。'
     return 1
   }
-  log "ACME 证书已安装：$ACME_TLS_CERT"
+  info "ACME 证书已安装：$ACME_TLS_CERT"
 }
 
 remove_acme_certificate() {
@@ -2562,7 +2584,7 @@ remove_acme_certificate() {
     rm -f "$XRAY_HOME/client-ws.txt"
     refresh_xray_client_info
   fi
-  log 'ACME 证书及依赖此证书的节点已移除'
+  info 'ACME 证书及依赖此证书的节点已移除'
 }
 
 renew_acme_certificate() {
@@ -2580,11 +2602,11 @@ renew_acme_certificate() {
   run_lego "$domain" "$ACME_CF_TOKEN_FILE" || return 1
   after_digest=$(sha256sum "$ACME_DATA_HOME/certificates/${domain}.crt" | awk '{print $1}')
   if [[ -n "$before_digest" && "$before_digest" == "$after_digest" ]]; then
-    log 'ACME 证书暂不需要续期'
+    info 'ACME 证书暂不需要续期'
     return
   fi
   deploy_acme_certificate "$domain" || return 1
-  log 'ACME 证书已续期并部署'
+  info 'ACME 证书已续期并部署'
 }
 
 manage_tls_certificates() {
@@ -2642,14 +2664,14 @@ ensure_self_signed_certificate() {
       install_tls_certificate "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
         "$LEGACY_SING_BOX_TLS_HOME/key.pem" "$SELF_SIGNED_TLS_CERT" \
         "$SELF_SIGNED_TLS_KEY" || return 1
-      log "已迁移 sing-box 自签证书：$SELF_SIGNED_TLS_HOME"
+      info "已迁移 sing-box 自签证书：$SELF_SIGNED_TLS_HOME"
       return
     fi
   fi
   generate_self_signed_certificate "$cert_file" "$key_file" || return 1
   install_tls_certificate "$cert_file" "$key_file" "$SELF_SIGNED_TLS_CERT" \
     "$SELF_SIGNED_TLS_KEY" || return 1
-  log "已生成 sing-box 自签名 TLS 证书"
+  info "已生成 sing-box 自签名 TLS 证书"
 }
 
 migrate_legacy_tls_layout() {
@@ -3020,7 +3042,7 @@ setup_sing_box_node() {
     return 1
   fi
 
-  log "原配置已备份：$backup_file"
+  info "原配置已备份：$backup_file"
   save_sing_box_client_info
 }
 
@@ -3082,7 +3104,7 @@ EOF
 }
 
 sing_box_cli_error() {
-  printf '%s\n' "$1" >&2
+  error "$1"
   printf '请使用 rb sing-box --help 查看用法。\n' >&2
   return 2
 }
@@ -3190,7 +3212,7 @@ run_sing_box_remove_command() {
   SELECTED_NODE_INDEXES=("1")
   SELECTED_NODE_COUNT=1
   remove_selected_nodes || return
-  log "已删除 sing-box ${label} 节点"
+  info "已删除 sing-box ${label} 节点"
 }
 
 run_sing_box_command() {
