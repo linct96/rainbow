@@ -2859,7 +2859,7 @@ read_sing_box_node_details() {
 }
 
 resolve_sing_box_cli_node_details() {
-  local protocol="tcp"
+  local protocol="tcp" tag="rainbow-${SING_NODE_TYPE}"
   [[ "$SING_NODE_TYPE" == "tuic" || "$SING_NODE_TYPE" == "hysteria2" ]] \
     && protocol="udp"
 
@@ -2870,7 +2870,10 @@ resolve_sing_box_cli_node_details() {
     }
     printf '已选择随机端口：%s\n' "$NODE_PORT"
   else
-    if port_in_use "$NODE_PORT" "$protocol"; then
+    if port_in_use "$NODE_PORT" "$protocol" \
+      && ! jq -e --arg tag "$tag" --argjson port "$NODE_PORT" \
+        'any(.inbounds[]?; .tag == $tag and .listen_port == $port)' \
+        "$SING_BOX_HOME/config.json" >/dev/null; then
       printf '端口 %s 已被占用。\n' "$NODE_PORT" >&2
       return 1
     fi
