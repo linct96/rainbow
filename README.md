@@ -13,7 +13,7 @@ rb
 ```
 
 主菜单可设置节点名称前缀，默认使用服务器主机名。客户端节点名称格式为
-`{前缀名称}-Rainbow-{协议}`，例如 `vps01-Rainbow-XHTTP`；WARP 节点会额外追加
+`{前缀名称}-{协议}`，例如 `vps01-XHTTP`；WARP 节点会额外追加
 `-WARP`。
 
 首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。WARP 注册会自动接受 [Cloudflare 服务条款](https://www.cloudflare.com/application/terms/)。
@@ -114,7 +114,7 @@ journalctl -u rainbow-acme.service
 
 ## VLESS + WebSocket + Cloudflare Argo 隧道
 
-Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-Rainbow-ARGO`，WARP 节点追加 `-WARP`。
+Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-ARGO`，WARP 节点追加 `-WARP`。
 
 脚本会安装独立的 `cloudflared`，并创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站。客户端固定连接 `443` 端口，可以另外输入优选域名作为连接地址。
 

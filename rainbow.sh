@@ -172,7 +172,7 @@ configure_node_prefix() {
   install -d -m 0700 "$RAINBOW_HOME"
   printf '%s\n' "$input" > "$NODE_PREFIX_FILE"
   chmod 0600 "$NODE_PREFIX_FILE"
-  printf '节点名称将使用：%s-Rainbow-{协议}\n' "$input"
+  printf '节点名称将使用：%s-{协议}\n' "$input"
 }
 
 show_tls_status() {
@@ -1256,10 +1256,10 @@ save_xray_client_info() {
 
   prefix=$(get_node_prefix)
   case "$NODE_TYPE" in
-    xhttp) label="${prefix}-Rainbow-XHTTP" ;;
-    tcp) label="${prefix}-Rainbow-TCP" ;;
-    ws) label="${prefix}-Rainbow-WS" ;;
-    ws-tunnel | ws-named-tunnel) label="${prefix}-Rainbow-ARGO" ;;
+    xhttp) label="${prefix}-XHTTP" ;;
+    tcp) label="${prefix}-TCP" ;;
+    ws) label="${prefix}-CDN" ;;
+    ws-tunnel | ws-named-tunnel) label="${prefix}-ARGO" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1331,7 +1331,7 @@ refresh_quick_tunnel_client() {
     | .streamSettings.wsSettings.path
   ' "$XRAY_HOME/config.json")
   prefix=$(get_node_prefix)
-  label="${prefix}-Rainbow-ARGO"
+  label="${prefix}-ARGO"
   install -m 0600 /dev/null "$client_file"
 
   while IFS=$'\t' read -r uuid email; do
@@ -2851,9 +2851,9 @@ save_sing_box_client_info() {
 
   prefix=$(get_node_prefix)
   case "$SING_NODE_TYPE" in
-    tuic) label="${prefix}-Rainbow-TUIC" ;;
-    anytls) label="${prefix}-Rainbow-AnyTLS" ;;
-    hysteria2) label="${prefix}-Rainbow-HY2" ;;
+    tuic) label="${prefix}-TUIC" ;;
+    anytls) label="${prefix}-AnyTLS" ;;
+    hysteria2) label="${prefix}-HY2" ;;
   esac
   install -m 0600 /dev/null "$client_file"
   case "$WARP_MODE" in
