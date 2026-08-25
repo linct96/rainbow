@@ -637,6 +637,93 @@ read_node_details() {
   fi
 }
 
+resolve_xray_cli_node_details() {
+  local current_tag="rainbow-vless-${NODE_TYPE}" index start
+  local -a cf_ports=(443 2053 2083 2087 2096 8443)
+
+  if [[ -z "$NODE_PORT" ]]; then
+    if [[ "$NODE_TYPE" == "ws" ]]; then
+      start=$(($(od -An -N 1 -tu1 /dev/urandom) % ${#cf_ports[@]}))
+      for ((index = 0; index < ${#cf_ports[@]}; index++)); do
+        NODE_PORT=${cf_ports[(start + index) % ${#cf_ports[@]}]}
+        if ! port_in_use "$NODE_PORT" || jq -e --arg tag "$current_tag" \
+          --argjson port "$NODE_PORT" \
+          'any(.inbounds[]?; .tag == $tag and .port == $port)' \
+          "$XRAY_HOME/config.json" >/dev/null; then
+          break
+        fi
+        NODE_PORT=""
+      done
+      [[ -n "$NODE_PORT" ]] || {
+        xray_cli_error '没有可用的 Cloudflare HTTPS 端口。'
+        return
+      }
+    else
+      NODE_PORT=$(random_high_port) || {
+        xray_cli_error '未找到可用的随机端口。'
+        return
+      }
+    fi
+    info "已选择随机端口：$NODE_PORT"
+  elif port_in_use "$NODE_PORT" && ! jq -e --arg tag "$current_tag" \
+    --argjson port "$NODE_PORT" \
+    'any(.inbounds[]?; .tag == $tag and .port == $port)' \
+    "$XRAY_HOME/config.json" >/dev/null; then
+    xray_cli_error "端口 ${NODE_PORT} 已被占用。"
+    return
+  fi
+
+  case "$NODE_TYPE" in
+    xhttp | tcp)
+      if [[ -z "$NODE_SERVER_NAME" ]]; then
+        NODE_SERVER_NAME=$(detect_reality_server_name)
+        info "已选择内置 REALITY 伪装域名：$NODE_SERVER_NAME"
+      fi
+      if [[ -z "$NODE_ADDRESS" ]]; then
+        NODE_ADDRESS=$(detect_public_ipv4) || {
+          xray_cli_error '无法检测公网 IPv4，请使用 --address 指定节点地址。'
+          return
+        }
+      fi
+      [[ "$NODE_TYPE" != "xhttp" ]] || NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
+      ;;
+    ws)
+      NODE_SERVER_NAME=$NODE_ADDRESS
+      openssl x509 -in "$ACME_TLS_CERT" -noout -checkhost "$NODE_SERVER_NAME" \
+        >/dev/null || {
+          xray_cli_error "当前 ACME 证书不包含域名：$NODE_SERVER_NAME"
+          return
+        }
+      if ! command -v getent >/dev/null 2>&1 \
+        || ! getent ahosts "$NODE_ADDRESS" >/dev/null 2>&1; then
+          xray_cli_error "优选域名无法解析：$NODE_ADDRESS"
+          return
+      fi
+      NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
+      ;;
+    ws-tunnel)
+      NODE_SERVER_NAME=""
+      if [[ -n "$NODE_ADDRESS" ]]; then
+        if ! command -v getent >/dev/null 2>&1 \
+          || ! getent ahosts "$NODE_ADDRESS" >/dev/null 2>&1; then
+          xray_cli_error "优选域名无法解析：$NODE_ADDRESS"
+          return
+        fi
+      fi
+      NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
+      ;;
+    ws-named-tunnel)
+      IFS= read -r NODE_TUNNEL_TOKEN < "$NODE_TUNNEL_TOKEN_FILE"
+      [[ -n "$NODE_TUNNEL_TOKEN" ]] || {
+        xray_cli_error 'Cloudflare Tunnel Token 文件为空。'
+        return
+      }
+      NODE_SERVER_NAME=$NODE_ADDRESS
+      NODE_PATH=${NODE_PATH:-/$(random_hex 4)}
+      ;;
+  esac
+}
+
 valid_domain_prefix() {
   [[ ${#1} -ge 1 && ${#1} -le 63 \
     && "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
@@ -1555,8 +1642,14 @@ setup_xray_node() {
     return 1
   fi
 
-  select_warp_mode
-  select_vless_encryption
+  if [[ "${CLI_MODE:-0}" == "1" ]]; then
+    VLESS_ENCRYPTION_ENABLED=0
+    NODE_ENCRYPTION="none"
+    NODE_DECRYPTION="none"
+  else
+    select_warp_mode
+    select_vless_encryption
+  fi
   if [[ "$WARP_MODE" != "direct" ]]; then
     command -v getent >/dev/null 2>&1 || {
       printf '搭建 Xray WARP 节点需要 getent 命令。\n' >&2
@@ -1572,7 +1665,11 @@ setup_xray_node() {
       return 1
     }
   fi
-  read_node_details || return
+  if [[ "${CLI_MODE:-0}" == "1" ]]; then
+    resolve_xray_cli_node_details || return
+  else
+    read_node_details || return
+  fi
   generate_xray_credentials || {
     printf '生成 Xray 凭据失败。\n' >&2
     return 1
@@ -3109,6 +3206,141 @@ prepare_rainbow() {
   [[ -x "$ACME_BIN" ]] || install_lego || die "初始化 lego 失败"
 }
 
+show_xray_cli_help() {
+  cat <<'EOF'
+用法：
+  rb xray add <xhttp|tcp|cdn|argo> [选项]
+
+选项：
+  --port <端口>                  省略时随机生成
+  --address <IP或域名>          CDN 和固定 ARGO 必填完整域名
+  --warp <direct|both|warp>      默认 direct
+  --sni <域名>                  REALITY 伪装域名，省略时按地区自动选择
+  --path <路径>                 XHTTP、CDN 或 ARGO 路径，省略时随机生成
+  --token-file <文件>           ARGO Token 文件；省略时创建临时隧道
+  -h, --help                    显示帮助
+
+REALITY 内置伪装域名：新加坡 mirror.sg.gs，美国 www.stanford.edu，其他 www.kernel.org
+EOF
+}
+
+xray_cli_error() {
+  error "$1"
+  printf '请使用 rb xray --help 查看用法。\n' >&2
+  return 2
+}
+
+parse_xray_add_options() {
+  CLI_MODE=1
+  WARP_MODE="direct"
+  NODE_PORT=""
+  NODE_ADDRESS=""
+  NODE_SERVER_NAME=""
+  NODE_PATH=""
+  NODE_TUNNEL_TOKEN=""
+  NODE_TUNNEL_TOKEN_FILE=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port | --address | --warp | --sni | --path | --token-file)
+        [[ $# -ge 2 ]] || { xray_cli_error "缺少 $1 参数。"; return; }
+        case "$1" in
+          --port) NODE_PORT=$2 ;;
+          --address) NODE_ADDRESS=$2 ;;
+          --warp) WARP_MODE=$2 ;;
+          --sni) NODE_SERVER_NAME=$2 ;;
+          --path) NODE_PATH=$2 ;;
+          --token-file) NODE_TUNNEL_TOKEN_FILE=$2 ;;
+        esac
+        shift 2
+        ;;
+      *) xray_cli_error "未知参数：$1"; return ;;
+    esac
+  done
+
+  if [[ -n "$NODE_PORT" ]]; then
+    [[ "$NODE_PORT" =~ ^[0-9]+$ && ${#NODE_PORT} -le 5 ]] \
+      || { xray_cli_error '端口必须是 1 到 65535 之间的整数。'; return; }
+    NODE_PORT=$((10#$NODE_PORT))
+    ((NODE_PORT >= 1 && NODE_PORT <= 65535)) \
+      || { xray_cli_error '端口必须是 1 到 65535 之间的整数。'; return; }
+  fi
+  [[ -z "$NODE_ADDRESS" \
+    || "$NODE_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+    || { xray_cli_error '节点地址格式错误。'; return; }
+  [[ "$WARP_MODE" =~ ^(direct|both|warp)$ ]] \
+    || { xray_cli_error '--warp 仅支持 direct、both 或 warp。'; return; }
+  [[ -z "$NODE_PATH" ]] || {
+    [[ "$NODE_PATH" == /* ]] || NODE_PATH="/$NODE_PATH"
+    [[ "$NODE_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]] \
+      || { xray_cli_error '路径格式错误。'; return; }
+  }
+  case "$XRAY_CLI_TYPE" in
+    xhttp)
+      [[ -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+        || { xray_cli_error 'XHTTP 不支持 Tunnel Token。'; return; }
+      [[ -z "$NODE_SERVER_NAME" ]] || valid_domain "$NODE_SERVER_NAME" \
+        || { xray_cli_error 'REALITY 伪装域名格式错误。'; return; }
+      ;;
+    tcp)
+      [[ -z "$NODE_PATH" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+        || { xray_cli_error 'TCP 不支持路径或 Tunnel Token。'; return; }
+      [[ -z "$NODE_SERVER_NAME" ]] || valid_domain "$NODE_SERVER_NAME" \
+        || { xray_cli_error 'REALITY 伪装域名格式错误。'; return; }
+      ;;
+    cdn)
+      [[ -z "$NODE_SERVER_NAME" && -z "$NODE_TUNNEL_TOKEN_FILE" ]] \
+        || { xray_cli_error 'CDN 不支持 --sni 或 Tunnel Token。'; return; }
+      [[ -z "$NODE_PORT" ]] || valid_cf_https_port "$NODE_PORT" \
+        || { xray_cli_error 'CDN 端口仅支持 443、2053、2083、2087、2096、8443。'; return; }
+      valid_domain "$NODE_ADDRESS" \
+        || { xray_cli_error 'CDN 必须通过 --address 指定完整域名。'; return; }
+      ;;
+    argo)
+      [[ -z "$NODE_SERVER_NAME" ]] \
+        || { xray_cli_error 'ARGO 不支持 --sni。'; return; }
+      if [[ -n "$NODE_TUNNEL_TOKEN_FILE" ]]; then
+        [[ -r "$NODE_TUNNEL_TOKEN_FILE" && -s "$NODE_TUNNEL_TOKEN_FILE" ]] \
+          || { xray_cli_error 'Tunnel Token 文件不存在、不可读或为空。'; return; }
+        valid_domain "$NODE_ADDRESS" \
+          || { xray_cli_error '固定 ARGO 必须通过 --address 指定完整域名。'; return; }
+        NODE_TYPE="ws-named-tunnel"
+      fi
+      [[ -z "$NODE_ADDRESS" ]] || valid_domain "$NODE_ADDRESS" \
+        || { xray_cli_error 'ARGO 优选地址必须是域名。'; return; }
+      ;;
+  esac
+}
+
+run_xray_command() {
+  local command=${1:-}
+
+  case "$command" in
+    add)
+      shift
+      [[ $# -gt 0 ]] || { xray_cli_error '缺少 Xray 节点类型。'; return; }
+      if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        show_xray_cli_help
+        return
+      fi
+      XRAY_CLI_TYPE=$1
+      shift
+      case "$XRAY_CLI_TYPE" in
+        xhttp | tcp) NODE_TYPE=$XRAY_CLI_TYPE ;;
+        cdn) NODE_TYPE="ws" ;;
+        argo) NODE_TYPE="ws-tunnel" ;;
+        *) xray_cli_error "不支持的 Xray 节点类型：$XRAY_CLI_TYPE"; return ;;
+      esac
+      parse_xray_add_options "$@" || return
+      prepare_rainbow
+      setup_xray_node
+      ;;
+    -h | --help | help) show_xray_cli_help ;;
+    '') xray_cli_error '缺少 Xray 子命令。' ;;
+    *) xray_cli_error "未知 Xray 子命令：$command" ;;
+  esac
+}
+
 show_sing_box_cli_help() {
   cat <<'EOF'
 用法：
@@ -3498,6 +3730,10 @@ run_command() {
     sing-box)
       shift
       run_sing_box_command "$@"
+      ;;
+    xray)
+      shift
+      run_xray_command "$@"
       ;;
     cert)
       shift
