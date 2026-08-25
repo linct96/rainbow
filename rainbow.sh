@@ -3660,42 +3660,16 @@ main() {
     show_installation_status
     select_action
 
-    if [[ "$ACTION" == "uninstall" ]]; then
-      uninstall_rainbow && exit
-      pause_menu
-      continue
-    fi
-    if [[ "$ACTION" == "show-nodes" ]]; then
-      show_all_nodes
-      continue
-    fi
-    if [[ "$ACTION" == "remove-nodes" ]]; then
-      manage_node_removal || true
-      pause_menu
-      continue
-    fi
-    if [[ "$ACTION" == "edit-node" ]]; then
-      manage_node_edit || true
-      pause_menu
-      continue
-    fi
-    if [[ "$ACTION" == "xray-node" ]]; then
-      manage_xray_nodes
-      continue
-    fi
-    if [[ "$ACTION" == "sing-box-node" ]]; then
-      manage_sing_box_nodes
-      continue
-    fi
-    if [[ "$ACTION" == "tls" ]]; then
-      manage_tls_certificates
-      continue
-    fi
-    if [[ "$ACTION" == "node-prefix" ]]; then
-      configure_node_prefix
-      pause_menu
-      continue
-    fi
+    case "$ACTION" in
+      uninstall) uninstall_rainbow && exit; pause_menu ;;
+      show-nodes) show_all_nodes ;;
+      remove-nodes) manage_node_removal || true; pause_menu ;;
+      edit-node) manage_node_edit || true; pause_menu ;;
+      xray-node) manage_xray_nodes ;;
+      sing-box-node) manage_sing_box_nodes ;;
+      tls) manage_tls_certificates ;;
+      node-prefix) configure_node_prefix; pause_menu ;;
+    esac
   done
 }
 
