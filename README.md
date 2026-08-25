@@ -183,3 +183,20 @@ Token 保存在 `~/rainbow/cloudflared/named-token`，权限为 `0600`。客户�
 ```bash
 journalctl -u rainbow-cloudflared-named.service
 ```
+
+
+## 一键安装
+
+### 一键申请域名
+```bash
+rb cert add --domain example.com --cfapitoken "Cloudflare_API_Token" \
+&& rb cert status
+```
+
+### 一键安装 sing-box 节点
+```bash
+rb sing-box add tuic --port 10190 \
+&& rb sing-box add anytls --port 10191 \
+&& rb sing-box add hysteria2 --port 10192 \
+&& rb sing-box list
+```
