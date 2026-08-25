@@ -1884,25 +1884,25 @@ edit_node_port() {
     config_output="$TMP_DIR/edit-xray-node.json"
     service="$XRAY_SERVICE"
     tag="rainbow-vless-${type}"
-    jq --arg tag "$tag" --argjson port "$new_port" '
+    if ! jq --arg tag "$tag" --argjson port "$new_port" '
       .inbounds |= map(if .tag == $tag then .port = $port else . end)
     ' "$config_file" > "$config_output" \
-      && "$XRAY_HOME/xray" run -test -config "$config_output" || {
-        printf '修改后的 Xray 配置验证失败，原配置未修改。\n' >&2
-        return 1
-      }
+      || ! "$XRAY_HOME/xray" run -test -config "$config_output"; then
+      printf '修改后的 Xray 配置验证失败，原配置未修改。\n' >&2
+      return 1
+    fi
   else
     config_file="$SING_BOX_HOME/config.json"
     config_output="$TMP_DIR/edit-sing-box-node.json"
     service="$SING_BOX_SERVICE"
     tag="rainbow-${type}"
-    jq --arg tag "$tag" --argjson port "$new_port" '
+    if ! jq --arg tag "$tag" --argjson port "$new_port" '
       .inbounds |= map(if .tag == $tag then .listen_port = $port else . end)
     ' "$config_file" > "$config_output" \
-      && "$SING_BOX_HOME/sing-box" check -c "$config_output" || {
-        printf '修改后的 sing-box 配置验证失败，原配置未修改。\n' >&2
-        return 1
-      }
+      || ! "$SING_BOX_HOME/sing-box" check -c "$config_output"; then
+      printf '修改后的 sing-box 配置验证失败，原配置未修改。\n' >&2
+      return 1
+    fi
   fi
 
   if [[ "$type" != "ws-tunnel" && "$type" != "ws-named-tunnel" ]]; then
@@ -2111,11 +2111,12 @@ remove_selected_nodes() {
       return 1
     }
     xray_types_json=$(printf '%s\n' "${xray_types[@]}" | jq -Rn '[inputs]')
-    write_xray_removal_config "$XRAY_HOME/config.json" "$xray_config" "$xray_types_json" \
-      && "$XRAY_HOME/xray" run -test -config "$xray_config" || {
-        printf '删除后的 Xray 配置验证失败，原配置未修改。\n' >&2
-        return 1
-      }
+    if ! write_xray_removal_config "$XRAY_HOME/config.json" "$xray_config" \
+      "$xray_types_json" \
+      || ! "$XRAY_HOME/xray" run -test -config "$xray_config"; then
+      printf '删除后的 Xray 配置验证失败，原配置未修改。\n' >&2
+      return 1
+    fi
     xray_backup=$(mktemp "$XRAY_HOME/config.json.backup.XXXXXX")
     install -m 0600 "$XRAY_HOME/config.json" "$xray_backup" || return 1
   fi
@@ -2126,11 +2127,12 @@ remove_selected_nodes() {
       return 1
     }
     sing_types_json=$(printf '%s\n' "${sing_types[@]}" | jq -Rn '[inputs]')
-    write_sing_box_removal_config "$SING_BOX_HOME/config.json" "$sing_config" \
-      "$sing_types_json" && "$SING_BOX_HOME/sing-box" check -c "$sing_config" || {
-        printf '删除后的 sing-box 配置验证失败，原配置未修改。\n' >&2
-        return 1
-      }
+    if ! write_sing_box_removal_config "$SING_BOX_HOME/config.json" "$sing_config" \
+      "$sing_types_json" \
+      || ! "$SING_BOX_HOME/sing-box" check -c "$sing_config"; then
+      printf '删除后的 sing-box 配置验证失败，原配置未修改。\n' >&2
+      return 1
+    fi
     sing_backup=$(mktemp "$SING_BOX_HOME/config.json.backup.XXXXXX")
     install -m 0600 "$SING_BOX_HOME/config.json" "$sing_backup" || return 1
   fi
