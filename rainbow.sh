@@ -577,6 +577,19 @@ detect_public_ipv4() {
   printf '%s\n' "$address"
 }
 
+detect_reality_server_name() {
+  local country
+
+  country=$(curl --retry 2 --connect-timeout 5 -fsSL \
+    https://www.cloudflare.com/cdn-cgi/trace \
+    | awk -F= '$1 == "loc" {gsub(/\r/, "", $2); print $2; exit}' || true)
+  case "$country" in
+    SG) printf '%s\n' 'mirror.sg.gs' ;;
+    US) printf '%s\n' 'www.stanford.edu' ;;
+    *) printf '%s\n' 'www.kernel.org' ;;
+  esac
+}
+
 read_node_address() {
   local default_address input
   default_address=$(detect_public_ipv4 || true)
@@ -608,12 +621,8 @@ read_node_details() {
   read_node_port || return
   read_node_address
 
-  read -r -p '请输入 REALITY 伪装域名（直接回车使用 www.apple.com）：' input
-  NODE_SERVER_NAME=${input:-www.apple.com}
-  [[ "$NODE_SERVER_NAME" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || {
-    printf '伪装域名格式错误。\n' >&2
-    return 1
-  }
+  NODE_SERVER_NAME=$(detect_reality_server_name)
+  info "已选择内置 REALITY 伪装域名：$NODE_SERVER_NAME"
 
   NODE_PATH=""
   if [[ "$NODE_TYPE" == "xhttp" ]]; then
