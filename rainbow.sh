@@ -2060,6 +2060,8 @@ remove_selected_nodes() {
     && ! install -m 0600 "$sing_config" "$SING_BOX_HOME/config.json"; then
     apply_failed=1
   fi
+  # 重启代理可能切断当前 SSH；忽略挂断信号，确保后续清理完成。
+  trap '' HUP
   if [[ "$apply_failed" == "0" && -n "$xray_backup" ]] \
     && ! systemctl restart "$XRAY_SERVICE"; then
     apply_failed=1
@@ -2079,6 +2081,7 @@ remove_selected_nodes() {
     [[ "$quick_active" == "0" ]] || systemctl restart "$CLOUDFLARED_SERVICE" || true
     [[ "$named_active" == "0" ]] \
       || systemctl restart "$CLOUDFLARED_NAMED_SERVICE" || true
+    trap - HUP
     printf '节点删除失败，已恢复原配置。\n' >&2
     return 1
   fi
@@ -2105,6 +2108,7 @@ remove_selected_nodes() {
   if [[ "$quick_selected" == "1" || "$named_selected" == "1" ]]; then
     systemctl daemon-reload
   fi
+  trap - HUP
 }
 
 manage_node_removal() {
