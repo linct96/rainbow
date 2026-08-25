@@ -2752,18 +2752,6 @@ sing_box_version_at_least() {
   ((major > 1 || (major == 1 && minor >= required_minor)))
 }
 
-sing_box_supports_anytls() {
-  sing_box_version_at_least 12
-}
-
-sing_box_supports_hysteria2() {
-  sing_box_version_at_least 5
-}
-
-sing_box_supports_wireguard_endpoint() {
-  sing_box_version_at_least 11
-}
-
 ensure_self_signed_certificate() {
   local cert_file="$TMP_DIR/sing-box-cert.pem" key_file="$TMP_DIR/sing-box-key.pem"
 
@@ -3010,11 +2998,11 @@ setup_sing_box_node() {
       return 1
     }
   done
-  if [[ "$SING_NODE_TYPE" == "anytls" ]] && ! sing_box_supports_anytls; then
+  if [[ "$SING_NODE_TYPE" == "anytls" ]] && ! sing_box_version_at_least 12; then
     printf 'AnyTLS 需要 sing-box 1.12.0 或更高版本。\n' >&2
     return 1
   fi
-  if [[ "$SING_NODE_TYPE" == "hysteria2" ]] && ! sing_box_supports_hysteria2; then
+  if [[ "$SING_NODE_TYPE" == "hysteria2" ]] && ! sing_box_version_at_least 5; then
     printf 'Hysteria2 需要 sing-box 1.5.0 或更高版本。\n' >&2
     return 1
   fi
@@ -3022,7 +3010,7 @@ setup_sing_box_node() {
     select_warp_mode
   fi
   if [[ "$WARP_MODE" != "direct" ]]; then
-    if ! sing_box_supports_wireguard_endpoint; then
+    if ! sing_box_version_at_least 11; then
       printf 'WARP 需要 sing-box 1.11.0 或更高版本。\n' >&2
       return 1
     fi
