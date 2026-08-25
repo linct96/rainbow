@@ -3092,7 +3092,7 @@ show_sing_box_cli_help() {
 用法：
   rb sing-box list
   rb sing-box add <tuic|anytls|hysteria2> [选项]
-  rb sing-box remove <tuic|anytls|hysteria2> [--yes]
+  rb sing-box remove <tuic|anytls|hysteria2>... [--yes]
 
 选项：
   --port <端口>                  省略时随机生成
@@ -3154,22 +3154,28 @@ parse_sing_box_add_options() {
 }
 
 run_sing_box_remove_command() {
-  local answer assume_yes=0 command_name label tag type=${1:-}
-  shift || true
+  local answer arg assume_yes=0 command_name index label requested=" "
+  local requested_types="" tag type
 
-  if [[ "$type" == "-h" || "$type" == "--help" ]]; then
-    show_sing_box_cli_help
-    return
-  fi
-  [[ "$type" =~ ^(tuic|anytls|hysteria2)$ ]] \
-    || { sing_box_cli_error "不支持的 sing-box 节点类型：${type:-未指定}"; return; }
   while [[ $# -gt 0 ]]; do
-    case "$1" in
+    arg=$1
+    case "$arg" in
       --yes) assume_yes=1 ;;
-      *) sing_box_cli_error "未知参数：$1"; return ;;
+      -h | --help) show_sing_box_cli_help; return ;;
+      --*) sing_box_cli_error "未知参数：$arg"; return ;;
+      *)
+        [[ "$arg" =~ ^(tuic|anytls|hysteria2)$ ]] \
+          || { sing_box_cli_error "不支持的 sing-box 节点类型：$arg"; return; }
+        if [[ "$requested" != *" $arg "* ]]; then
+          requested+="$arg "
+          requested_types+="$arg "
+        fi
+        ;;
     esac
     shift
   done
+  [[ -n "$requested_types" ]] \
+    || { sing_box_cli_error '缺少 sing-box 节点类型。'; return; }
 
   require_root
   for command_name in install jq systemctl; do
@@ -3177,27 +3183,42 @@ run_sing_box_remove_command() {
   done
   init_temp_dir
   if [[ ! -f "$SING_BOX_HOME/config.json" ]]; then
-    printf '当前没有 %s 节点。\n' "$type"
+    warn '当前没有 sing-box 节点。'
     return
   fi
   jq -e 'type == "object"' "$SING_BOX_HOME/config.json" >/dev/null || {
     printf 'sing-box 配置格式错误，无法删除节点。\n' >&2
     return 1
   }
-  tag="rainbow-${type}"
-  if ! jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
-    "$SING_BOX_HOME/config.json" >/dev/null; then
-    printf '当前没有 %s 节点。\n' "$type"
-    return
-  fi
-  case "$type" in
-    tuic) label="TUIC" ;;
-    anytls) label="AnyTLS" ;;
-    hysteria2) label="Hysteria2" ;;
-  esac
+  REMOVE_NODE_ENGINES=()
+  REMOVE_NODE_TYPES=()
+  REMOVE_NODE_LABELS=()
+  REMOVE_NODE_COUNT=0
+  SELECTED_NODE_INDEXES=()
+  SELECTED_NODE_COUNT=0
+  for type in $requested_types; do
+    case "$type" in
+      tuic) label="TUIC" ;;
+      anytls) label="AnyTLS" ;;
+      hysteria2) label="Hysteria2" ;;
+    esac
+    tag="rainbow-${type}"
+    if ! jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
+      "$SING_BOX_HOME/config.json" >/dev/null; then
+      warn "当前没有 ${label} 节点。"
+      continue
+    fi
+    add_removable_node "sing-box" "$type" "$label"
+    SELECTED_NODE_INDEXES+=("$REMOVE_NODE_COUNT")
+    SELECTED_NODE_COUNT=$((SELECTED_NODE_COUNT + 1))
+  done
+  ((SELECTED_NODE_COUNT > 0)) || return
 
   if [[ "$assume_yes" != "1" ]]; then
-    printf '将删除 sing-box 节点：%s\n' "$label"
+    printf '将删除 sing-box 节点：\n'
+    for ((index = 0; index < REMOVE_NODE_COUNT; index++)); do
+      printf '  - %s\n' "${REMOVE_NODE_LABELS[index]}"
+    done
     printf '同一协议的直出和 WARP 节点会一起删除。\n'
     read -r -p '请输入 DELETE 确认删除：' answer || return 1
     [[ "$answer" == "DELETE" ]] || {
@@ -3206,13 +3227,8 @@ run_sing_box_remove_command() {
     }
   fi
 
-  REMOVE_NODE_ENGINES=("sing-box")
-  REMOVE_NODE_TYPES=("$type")
-  REMOVE_NODE_LABELS=("$label")
-  SELECTED_NODE_INDEXES=("1")
-  SELECTED_NODE_COUNT=1
   remove_selected_nodes || return
-  info "已删除 sing-box ${label} 节点"
+  info "已删除 ${SELECTED_NODE_COUNT} 个 sing-box 节点"
 }
 
 run_sing_box_command() {

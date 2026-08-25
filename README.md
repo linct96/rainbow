@@ -27,6 +27,7 @@ rb sing-box add anytls --port 443
 rb sing-box add hysteria2 --address 1.2.3.4 --warp both
 rb sing-box remove tuic
 rb sing-box remove hysteria2 --yes
+rb sing-box remove tuic anytls hysteria2 --yes
 ```
 
 `--port` 省略时随机生成端口，`--address` 省略时自动检测公网 IPv4，
