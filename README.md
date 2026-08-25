@@ -72,9 +72,9 @@ rb cert remove --yes
 1,3,5
 ```
 
-删除操作只匹配 `rainbow-*` 标签。同一协议的直出和 WARP 节点会一起删除；没有其他 WARP 节点时，对应的共享 WARP 出站也会移除。删除 ARGO 节点时会同时清理对应的 cloudflared 服务和状态文件，不会删除共享程序、证书或 WARP 账户。
+删除操作只匹配 `rainbow-*` 标签。同一协议的直出和 WARP 节点会一起删除；没有其他 WARP 节点时，对应的共享 WARP 出站也会移除。删除 Tunnel 节点时会同时清理对应的 cloudflared 服务和状态文件，不会删除共享程序、证书或 WARP 账户。
 
-主菜单的“编辑节点”可修改 Rainbow 管理节点的监听端口，修改前会检查端口占用并验证新配置。固定 ARGO 隧道修改后，还需将 Cloudflare Published application 的回源端口改为相同值。
+主菜单的“编辑节点”可修改 Rainbow 管理节点的监听端口，修改前会检查端口占用并验证新配置。固定 Tunnel 修改后，还需将 Cloudflare Published application 的回源端口改为相同值。
 
 ## TLS 证书
 
@@ -147,9 +147,9 @@ journalctl -u rainbow-acme.service
 
 创建 VLESS + WebSocket 节点时可选启用 VLESS ENC。默认关闭以保持客户端兼容性；启用后使用 Xray 生成的 ML-KEM-768 加密对，仅支持新版 Xray 内核客户端。
 
-## VLESS + WebSocket + Cloudflare Argo 隧道
+## VLESS + WebSocket + Cloudflare Tunnel
 
-Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-ARGO`，WARP 节点追加 `-WARP`。
+Xray 节点菜单使用一个入口创建 Cloudflare Tunnel 节点。Tunnel Token 留空时创建临时隧道；输入 Token 时创建固定隧道。两种节点名称均为 `{节点前缀}-Tunnel`，WARP 节点追加 `-WARP`。
 
 脚本会安装独立的 `cloudflared`，并创建仅监听 `127.0.0.1` 的 VLESS + WebSocket 入站。客户端固定连接 `443` 端口，可以另外输入优选域名作为连接地址。
 

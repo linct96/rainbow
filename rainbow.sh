@@ -1384,7 +1384,7 @@ save_xray_client_info() {
     xhttp) label="${prefix}-XHTTP" ;;
     tcp) label="${prefix}-TCP" ;;
     ws) label="${prefix}-CDN" ;;
-    ws-tunnel | ws-named-tunnel) label="${prefix}-ARGO" ;;
+    ws-tunnel | ws-named-tunnel) label="${prefix}-Tunnel" ;;
   esac
 
   client_file="$XRAY_HOME/client-${NODE_TYPE}.txt"
@@ -1411,13 +1411,22 @@ save_xray_client_info() {
 }
 
 refresh_xray_client_info() {
-  local all_clients="$XRAY_HOME/client.txt" type
+  local all_clients="$XRAY_HOME/client.txt" client_file client_output type
 
+  [[ -d "$XRAY_HOME" ]] || return
   install -m 0600 /dev/null "$all_clients"
   for type in xhttp tcp ws ws-tunnel ws-named-tunnel; do
-    [[ -f "$XRAY_HOME/client-${type}.txt" ]] || continue
+    client_file="$XRAY_HOME/client-${type}.txt"
+    [[ -f "$client_file" ]] || continue
+    if [[ "$type" == "ws-tunnel" || "$type" == "ws-named-tunnel" ]]; then
+      client_output="${client_file}.tmp"
+      sed -e 's/-ARGO-WARP$/-Tunnel-WARP/' -e 's/-ARGO$/-Tunnel/' \
+        "$client_file" > "$client_output"
+      install -m 0600 "$client_output" "$client_file"
+      rm -f "$client_output"
+    fi
     [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
-    cat "$XRAY_HOME/client-${type}.txt" >> "$all_clients"
+    cat "$client_file" >> "$all_clients"
   done
 }
 
@@ -1456,7 +1465,7 @@ refresh_quick_tunnel_client() {
     | .streamSettings.wsSettings.path
   ' "$XRAY_HOME/config.json")
   prefix=$(get_node_prefix)
-  label="${prefix}-ARGO"
+  label="${prefix}-Tunnel"
   install -m 0600 /dev/null "$client_file"
 
   while IFS=$'\t' read -r uuid email; do
@@ -1772,6 +1781,7 @@ show_all_nodes() {
   clear_screen
   show_header '所有节点'
 
+  refresh_xray_client_info
   show_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
   printf '\n'
   show_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box'
@@ -1806,8 +1816,8 @@ discover_removable_nodes() {
         xhttp) label="VLESS + REALITY + XHTTP" ;;
         tcp) label="VLESS + REALITY + TCP" ;;
         ws) label="VLESS + TLS + WebSocket CDN" ;;
-        ws-tunnel) label="VLESS + WebSocket ARGO（临时）" ;;
-        ws-named-tunnel) label="VLESS + WebSocket ARGO（固定）" ;;
+        ws-tunnel) label="VLESS + WebSocket Tunnel（临时）" ;;
+        ws-named-tunnel) label="VLESS + WebSocket Tunnel（固定）" ;;
       esac
       add_removable_node "Xray" "$type" "$label"
     done
@@ -2272,7 +2282,7 @@ manage_xray_nodes() {
       '1) VLESS + REALITY + XHTTP' \
       '2) VLESS + REALITY + TCP' \
       '3) VLESS + TLS + WebSocket + Cloudflare CDN' \
-      '4) VLESS + WebSocket + Cloudflare Argo 隧道' \
+      '4) VLESS + WebSocket + Cloudflare Tunnel' \
       '0) 返回' \
       ''
     read -r -p '请输入 [0/1/2/3/4]：' choice
@@ -3380,6 +3390,7 @@ run_xray_command() {
       [[ $# -eq 1 ]] || { xray_cli_error 'list 不支持额外参数。'; return; }
       require_root
       command -v systemctl >/dev/null 2>&1 || die '缺少依赖：systemctl'
+      refresh_xray_client_info
       show_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
       ;;
     add)
@@ -3805,6 +3816,7 @@ run_command() {
       [[ $# -eq 1 ]] || { error 'list 不支持额外参数。'; return 2; }
       require_root
       command -v systemctl >/dev/null 2>&1 || die '缺少依赖：systemctl'
+      refresh_xray_client_info
       show_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
       printf '\n'
       show_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box'
