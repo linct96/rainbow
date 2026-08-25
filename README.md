@@ -37,6 +37,20 @@ rb sing-box remove tuic anytls hysteria2 --yes
 脚本日志使用绿色 `[INFO]`、黄色 `[WARN]` 和红色 `[ERROR]` 标签。非交互输出不包含颜色，
 可通过 `NO_COLOR=1` 强制关闭颜色。
 
+## 证书 CLI
+
+```bash
+rb cert add --domain example.com --cfapitoken "Cloudflare_API_Token"
+rb cert status
+rb cert remove
+rb cert remove --yes
+```
+
+`add` 会通过 Cloudflare DNS-01 同时申请 `example.com` 和 `*.example.com` 证书。
+`--domain` 只接受根域名，`--cfapitoken` 不会输出到日志，但会出现在 Shell 历史和短暂的进程参数中。
+`remove` 需要输入 `REMOVE` 确认，自动化场景可使用 `--yes` 跳过确认。移除 ACME
+证书时，依赖该证书的节点和客户端信息也会一并删除。
+
 首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。
 
 通过 rainbow 安装的程序和配置位于：

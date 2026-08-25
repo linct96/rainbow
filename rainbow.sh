@@ -2406,45 +2406,15 @@ EOF
   systemctl enable --now "$ACME_TIMER"
 }
 
-configure_acme_certificate() {
-  local domain token answer current_domain=""
-  local token_file command_name
-
+install_acme_certificate() {
+  local command_name domain=$1 token_file=$2
   for command_name in openssl tar; do
     command -v "$command_name" >/dev/null 2>&1 || {
       printf '申请 ACME 证书需要 %s 命令。\n' "$command_name" >&2
       return 1
     }
   done
-  while true; do
-    read -r -p '请输入根域名，例如 example.com：' domain
-    domain=$(normalize_domain "$domain")
-    valid_domain "$domain" && break
-    printf '根域名格式错误。\n' >&2
-  done
-  if [[ -s "$TLS_DOMAIN_FILE" ]]; then
-    IFS= read -r current_domain < "$TLS_DOMAIN_FILE"
-  fi
-  if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
-    printf '当前证书域名为 %s，替换后已有客户端需要更新 SNI。\n' "$current_domain"
-    read -r -p '请输入 REPLACE 确认替换：' answer
-    [[ "$answer" == "REPLACE" ]] || {
-      printf '已取消证书替换。\n'
-      return 1
-    }
-  fi
-  read -r -s -p '请输入 Cloudflare API Token：' token
-  printf '\n'
-  [[ -n "$token" ]] || {
-    printf 'Cloudflare API Token 不能为空。\n' >&2
-    return 1
-  }
   printf '将申请包含 %s 和 *.%s 的证书。\n' "$domain" "$domain"
-
-  token_file="$TMP_DIR/cf-token"
-  printf '%s' "$token" > "$token_file"
-  chmod 0600 "$token_file"
-  unset token
 
   install_lego || {
     printf '安装 lego 失败。\n' >&2
@@ -2470,8 +2440,42 @@ configure_acme_certificate() {
   info "ACME 证书已安装：$ACME_TLS_CERT"
 }
 
+configure_acme_certificate() {
+  local answer current_domain="" domain token token_file
+
+  while true; do
+    read -r -p '请输入根域名，例如 example.com：' domain
+    domain=$(normalize_domain "$domain")
+    valid_domain "$domain" && break
+    printf '根域名格式错误。\n' >&2
+  done
+  if [[ -s "$TLS_DOMAIN_FILE" ]]; then
+    IFS= read -r current_domain < "$TLS_DOMAIN_FILE"
+  fi
+  if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
+    printf '当前证书域名为 %s，替换后已有客户端需要更新 SNI。\n' "$current_domain"
+    read -r -p '请输入 REPLACE 确认替换：' answer
+    [[ "$answer" == "REPLACE" ]] || {
+      printf '已取消证书替换。\n'
+      return 1
+    }
+  fi
+  read -r -s -p '请输入 Cloudflare API Token：' token
+  printf '\n'
+  [[ -n "$token" ]] || {
+    printf 'Cloudflare API Token 不能为空。\n' >&2
+    return 1
+  }
+
+  token_file="$TMP_DIR/cf-token"
+  printf '%s' "$token" > "$token_file"
+  chmod 0600 "$token_file"
+  unset token
+  install_acme_certificate "$domain" "$token_file"
+}
+
 remove_acme_certificate() {
-  local answer config_file="$TMP_DIR/remove-acme.json" type
+  local answer assume_yes=${1:-0} config_file="$TMP_DIR/remove-acme.json" type
   local config_backup="$TMP_DIR/remove-acme.backup" timer_was_enabled=0
   local xray_config="$TMP_DIR/remove-acme-xray.json"
   local xray_backup="$TMP_DIR/remove-acme-xray.backup" ws_removed=0
@@ -2482,11 +2486,14 @@ remove_acme_certificate() {
     printf '当前没有 ACME 证书。\n'
     return
   fi
-  read -r -p '请输入 REMOVE 确认移除当前 ACME 证书：' answer
-  [[ "$answer" == "REMOVE" ]] || {
-    printf '已取消移除。\n'
-    return 1
-  }
+  if [[ "$assume_yes" != "1" ]]; then
+    read -r -p '请输入 REMOVE 确认移除当前 ACME 证书：' answer \
+      || return 1
+    [[ "$answer" == "REMOVE" ]] || {
+      printf '已取消移除。\n'
+      return 1
+    }
+  fi
   systemctl is-enabled "$ACME_TIMER" >/dev/null 2>&1 && timer_was_enabled=1
   if systemctl cat "$ACME_TIMER" >/dev/null 2>&1; then
     systemctl disable --now "$ACME_TIMER" || return 1
@@ -3272,6 +3279,153 @@ run_sing_box_command() {
   esac
 }
 
+show_certificate_cli_help() {
+  cat <<'EOF'
+用法：
+  rb cert add --domain <根域名> --cfapitoken <Token>
+  rb cert status
+  rb cert remove [--yes]
+
+选项：
+  --domain     证书根域名，同时申请泛域名证书
+  --cfapitoken Cloudflare API Token
+  --yes       移除证书时跳过确认
+  -h, --help  显示帮助
+EOF
+}
+
+certificate_cli_error() {
+  error "$1"
+  printf '请使用 rb cert --help 查看用法。\n' >&2
+  return 2
+}
+
+show_certificate_cli_status() {
+  local acme_expires="-" acme_status="未配置" domain="-" self_expires="-"
+  local self_status="未配置" timer_status="未运行"
+
+  if valid_self_signed_certificate; then
+    self_status="有效"
+  elif [[ -e "$SELF_SIGNED_TLS_CERT" || -e "$SELF_SIGNED_TLS_KEY" ]]; then
+    self_status="异常"
+  fi
+  if [[ -s "$SELF_SIGNED_TLS_CERT" ]]; then
+    self_expires=$(openssl x509 -in "$SELF_SIGNED_TLS_CERT" -noout -enddate 2>/dev/null \
+      | sed 's/^notAfter=//' || true)
+    self_expires=${self_expires:--}
+  fi
+
+  [[ ! -s "$TLS_DOMAIN_FILE" ]] || IFS= read -r domain < "$TLS_DOMAIN_FILE"
+  if valid_acme_certificate; then
+    acme_status="有效"
+  elif [[ -e "$ACME_TLS_CERT" || -e "$ACME_TLS_KEY" \
+    || -e "$TLS_DOMAIN_FILE" ]]; then
+    acme_status="异常"
+  fi
+  if [[ -s "$ACME_TLS_CERT" ]]; then
+    acme_expires=$(openssl x509 -in "$ACME_TLS_CERT" -noout -enddate 2>/dev/null \
+      | sed 's/^notAfter=//' || true)
+    acme_expires=${acme_expires:--}
+  fi
+  systemctl is-active --quiet "$ACME_TIMER" && timer_status="运行中"
+
+  printf '%s\n' \
+    "自签证书：${self_status}" \
+    "自签证书到期时间：${self_expires}" \
+    "ACME 证书：${acme_status}" \
+    "ACME 域名：${domain}" \
+    "ACME 证书到期时间：${acme_expires}" \
+    "自动续期：${timer_status}"
+}
+
+run_certificate_command() {
+  local assume_yes=0 command=${1:-} command_name current_domain=""
+  local domain="" token="" token_file
+  shift || true
+
+  case "$command" in
+    add)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --domain)
+            [[ $# -ge 2 ]] || { certificate_cli_error '缺少 --domain 参数。'; return; }
+            domain=$2
+            shift 2
+            ;;
+          --cfapitoken)
+            [[ $# -ge 2 ]] || { certificate_cli_error '缺少 --cfapitoken 参数。'; return; }
+            token=$2
+            shift 2
+            ;;
+          -h | --help)
+            show_certificate_cli_help
+            return
+            ;;
+          *)
+            certificate_cli_error "未知参数：$1"
+            return
+            ;;
+        esac
+      done
+      domain=$(normalize_domain "$domain")
+      valid_domain "$domain" \
+        || { certificate_cli_error '--domain 必须是有效的根域名。'; return; }
+      [[ -n "$token" ]] \
+        || { certificate_cli_error '--cfapitoken 不能为空。'; return; }
+      require_root
+      require_commands
+      init_temp_dir
+      [[ ! -s "$TLS_DOMAIN_FILE" ]] || IFS= read -r current_domain < "$TLS_DOMAIN_FILE"
+      if [[ -n "$current_domain" && "$current_domain" != "$domain" ]]; then
+        error "当前 ACME 证书域名为 ${current_domain}，请先执行 rb cert remove。"
+        return 1
+      fi
+      token_file="$TMP_DIR/cf-token"
+      printf '%s' "$token" > "$token_file"
+      chmod 0600 "$token_file"
+      unset token
+      install_acme_certificate "$domain" "$token_file"
+      ;;
+    status)
+      if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        show_certificate_cli_help
+        return
+      fi
+      [[ $# -eq 0 ]] || { certificate_cli_error 'status 不支持额外参数。'; return; }
+      require_root
+      for command_name in openssl sed sha256sum systemctl; do
+        command -v "$command_name" >/dev/null 2>&1 || die "缺少依赖：${command_name}"
+      done
+      show_certificate_cli_status
+      ;;
+    remove)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --yes) assume_yes=1 ;;
+          -h | --help) show_certificate_cli_help; return ;;
+          *) certificate_cli_error "未知参数：$1"; return ;;
+        esac
+        shift
+      done
+      require_root
+      for command_name in install jq systemctl; do
+        command -v "$command_name" >/dev/null 2>&1 || die "缺少依赖：${command_name}"
+      done
+      init_temp_dir
+      remove_acme_certificate "$assume_yes"
+      ;;
+    -h | --help | help)
+      show_certificate_cli_help
+      ;;
+    '')
+      certificate_cli_error '缺少 cert 子命令。'
+      ;;
+    *)
+      certificate_cli_error "未知 cert 子命令：$command"
+      ;;
+  esac
+}
+
 main() {
   prepare_rainbow
 
@@ -3329,6 +3483,10 @@ run_command() {
     sing-box)
       shift
       run_sing_box_command "$@"
+      ;;
+    cert)
+      shift
+      run_certificate_command "$@"
       ;;
     acme-renew)
       require_root
