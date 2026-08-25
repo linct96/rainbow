@@ -2420,7 +2420,7 @@ restore_tls_files() {
 install_tls_certificate() {
   local source_cert=$1 source_key=$2 target_cert=$3 target_key=$4
   local cert_backup="$TMP_DIR/tls-cert.backup" key_backup="$TMP_DIR/tls-key.backup"
-  local had_cert=0 had_key=0 service
+  local had_cert=0 had_key=0 rollback_service service
   local -a services=()
 
   [[ -s "$source_cert" && -s "$source_key" ]] || return 1
@@ -2460,8 +2460,8 @@ install_tls_certificate() {
     if ! systemctl restart "$service"; then
       restore_tls_files "$had_cert" "$had_key" "$cert_backup" "$key_backup" \
         "$target_cert" "$target_key"
-      for service in "${services[@]}"; do
-        systemctl restart "$service" || true
+      for rollback_service in "${services[@]}"; do
+        systemctl restart "$rollback_service" || true
       done
       return 1
     fi
