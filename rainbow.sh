@@ -467,22 +467,28 @@ rainbow_is_initialized() {
 }
 
 initialize_rainbow() {
-  detect_arch
   info "开始初始化 Rainbow"
 
-  PRODUCT="xray"
-  REPO="$XRAY_REPO"
-  read_latest_version
-  install_xray
+  if [[ ! -x "$XRAY_HOME/xray" || ! -f "$XRAY_HOME/config.json" \
+    || ! -f "/etc/systemd/system/${XRAY_SERVICE}.service" ]]; then
+    detect_arch
+    PRODUCT="xray"
+    REPO="$XRAY_REPO"
+    read_latest_version
+    install_xray
+  fi
 
-  PRODUCT="sing-box"
-  REPO="$SING_BOX_REPO"
-  read_latest_version
-  install_sing_box
+  if [[ ! -x "$SING_BOX_HOME/sing-box" || ! -f "$SING_BOX_HOME/config.json" \
+    || ! -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" ]]; then
+    detect_arch
+    PRODUCT="sing-box"
+    REPO="$SING_BOX_REPO"
+    read_latest_version
+    install_sing_box
+  fi
 
   ensure_warp_profile || die "初始化 WARP 配置失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
-  install_lego || die "初始化 lego 失败"
   info "Rainbow 初始化完成"
 }
 
