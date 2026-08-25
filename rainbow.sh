@@ -182,6 +182,16 @@ get_node_prefix() {
   printf '%s\n' "${prefix:-$(hostname)}"
 }
 
+save_node_prefix() {
+  local prefix=$1
+
+  [[ ${#prefix} -ge 1 && ${#prefix} -le 64 && ! "$prefix" =~ [[:cntrl:]] ]] \
+    || return 1
+  install -d -m 0700 "$RAINBOW_HOME"
+  printf '%s\n' "$prefix" > "$NODE_PREFIX_FILE"
+  chmod 0600 "$NODE_PREFIX_FILE"
+}
+
 configure_node_prefix() {
   local default_prefix input
 
@@ -191,9 +201,10 @@ configure_node_prefix() {
   read -r -p "请输入节点前缀（直接回车使用 ${default_prefix}）：" input
   input=${input:-$default_prefix}
 
-  install -d -m 0700 "$RAINBOW_HOME"
-  printf '%s\n' "$input" > "$NODE_PREFIX_FILE"
-  chmod 0600 "$NODE_PREFIX_FILE"
+  save_node_prefix "$input" || {
+    error '节点前缀长度必须为 1 到 64 个字符，且不能包含控制字符。'
+    return 1
+  }
   printf '节点名称将使用：%s-{协议}\n' "$input"
 }
 
@@ -3201,6 +3212,48 @@ prepare_rainbow() {
   [[ -x "$ACME_BIN" ]] || install_lego || die "初始化 lego 失败"
 }
 
+show_prefix_cli_help() {
+  cat <<'EOF'
+用法：
+  rb prefix set <前缀>
+  rb prefix show
+  rb prefix remove
+EOF
+}
+
+prefix_cli_error() {
+  error "$1"
+  printf '请使用 rb prefix --help 查看用法。\n' >&2
+  return 2
+}
+
+run_prefix_command() {
+  local command=${1:-}
+
+  case "$command" in
+    set)
+      [[ $# -eq 2 ]] || { prefix_cli_error 'set 需要一个节点前缀。'; return; }
+      require_root
+      save_node_prefix "$2" \
+        || { prefix_cli_error '节点前缀长度必须为 1 到 64 个字符，且不能包含控制字符。'; return; }
+      info "节点前缀已设置为：$2"
+      ;;
+    show)
+      [[ $# -eq 1 ]] || { prefix_cli_error 'show 不支持额外参数。'; return; }
+      printf '%s\n' "$(get_node_prefix)"
+      ;;
+    remove)
+      [[ $# -eq 1 ]] || { prefix_cli_error 'remove 不支持额外参数。'; return; }
+      require_root
+      rm -f "$NODE_PREFIX_FILE"
+      info "节点前缀已恢复为主机名：$(hostname)"
+      ;;
+    -h | --help | help) show_prefix_cli_help ;;
+    '') prefix_cli_error '缺少 prefix 子命令。' ;;
+    *) prefix_cli_error "未知 prefix 子命令：$command" ;;
+  esac
+}
+
 show_xray_cli_help() {
   cat <<'EOF'
 用法：
@@ -3752,6 +3805,10 @@ run_command() {
       show_nodes "$XRAY_SERVICE" "$XRAY_HOME/client.txt" 'Xray'
       printf '\n'
       show_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box'
+      ;;
+    prefix)
+      shift
+      run_prefix_command "$@"
       ;;
     cert)
       shift
