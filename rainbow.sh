@@ -477,6 +477,7 @@ initialize_rainbow() {
 
   ensure_warp_profile || die "初始化 WARP 配置失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
+  install_lego || die "初始化 lego 失败"
   info "Rainbow 初始化完成"
 }
 
@@ -3092,6 +3093,7 @@ prepare_rainbow() {
   migrate_legacy_tls_layout || die "迁移 TLS 证书失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
   rainbow_is_initialized || initialize_rainbow
+  [[ -x "$ACME_BIN" ]] || install_lego || die "初始化 lego 失败"
 }
 
 show_sing_box_cli_help() {

@@ -51,7 +51,7 @@ rb cert remove --yes
 `remove` 需要输入 `REMOVE` 确认，自动化场景可使用 `--yes` 跳过确认。移除 ACME
 证书时，依赖该证书的节点和客户端信息也会一并删除。
 
-首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。
+首次执行会自动安装最新版 Xray、sing-box、wgcf 和 lego，注册 WARP 账户并生成自签 TLS 证书。
 
 通过 rainbow 安装的程序和配置位于：
 
