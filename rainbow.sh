@@ -25,10 +25,6 @@ readonly ACME_TLS_HOME="$TLS_HOME/acme"
 readonly ACME_TLS_CERT="$ACME_TLS_HOME/cert.pem"
 readonly ACME_TLS_KEY="$ACME_TLS_HOME/key.pem"
 readonly TLS_DOMAIN_FILE="$TLS_HOME/domain"
-readonly LEGACY_TLS_CERT="$TLS_HOME/cert.pem"
-readonly LEGACY_TLS_KEY="$TLS_HOME/key.pem"
-readonly LEGACY_TLS_MODE_FILE="$TLS_HOME/mode"
-readonly LEGACY_SING_BOX_TLS_HOME="$SING_BOX_HOME/tls"
 readonly ACME_HOME="$RAINBOW_HOME/acme"
 readonly ACME_BIN="$ACME_HOME/lego"
 readonly ACME_DATA_HOME="$ACME_HOME/data"
@@ -327,12 +323,9 @@ install_sing_box() {
   digest=$(curl --retry 3 -fsSL "$api_url" \
     | jq -r --arg name "$archive_name" '.assets[] | select(.name == $name) | .digest // empty') \
     || die "获取校验值失败"
-  if [[ "$digest" == sha256:* ]]; then
-    expected=${digest#sha256:}
-    verify_sha256 "$TMP_DIR/$archive_name" "$expected"
-  else
-    warn "该历史版本未提供 SHA-256，跳过校验"
-  fi
+  [[ "$digest" == sha256:* ]] || die "sing-box Release 未提供 SHA-256 校验值"
+  expected=${digest#sha256:}
+  verify_sha256 "$TMP_DIR/$archive_name" "$expected"
 
   tar -xzf "$TMP_DIR/$archive_name" -C "$TMP_DIR"
   extracted_dir="$TMP_DIR/sing-box-${VERSION_NUMBER}-linux-${ARCH}"
@@ -1368,16 +1361,7 @@ restore_vless_encryption_state() {
 }
 
 save_xray_client_info() {
-  local all_clients="$XRAY_HOME/client.txt" client_file first_line label prefix
-
-  if [[ -f "$all_clients" && ! -f "$XRAY_HOME/client-xhttp.txt" \
-    && ! -f "$XRAY_HOME/client-tcp.txt" ]]; then
-    IFS= read -r first_line < "$all_clients" || true
-    case "$first_line" in
-      '类型：Rainbow-XHTTP') install -m 0600 "$all_clients" "$XRAY_HOME/client-xhttp.txt" ;;
-      '类型：Rainbow-TCP') install -m 0600 "$all_clients" "$XRAY_HOME/client-tcp.txt" ;;
-    esac
-  fi
+  local all_clients="$XRAY_HOME/client.txt" client_file label prefix
 
   prefix=$(get_node_prefix)
   case "$NODE_TYPE" in
@@ -1411,20 +1395,13 @@ save_xray_client_info() {
 }
 
 refresh_xray_client_info() {
-  local all_clients="$XRAY_HOME/client.txt" client_file client_output type
+  local all_clients="$XRAY_HOME/client.txt" client_file type
 
   [[ -d "$XRAY_HOME" ]] || return
   install -m 0600 /dev/null "$all_clients"
   for type in xhttp tcp ws ws-tunnel ws-named-tunnel; do
     client_file="$XRAY_HOME/client-${type}.txt"
     [[ -f "$client_file" ]] || continue
-    if [[ "$type" == "ws-tunnel" || "$type" == "ws-named-tunnel" ]]; then
-      client_output="${client_file}.tmp"
-      sed -e 's/-ARGO-WARP$/-Tunnel-WARP/' -e 's/-ARGO$/-Tunnel/' \
-        "$client_file" > "$client_output"
-      install -m 0600 "$client_output" "$client_file"
-      rm -f "$client_output"
-    fi
     [[ ! -s "$all_clients" ]] || printf '\n' >> "$all_clients"
     cat "$client_file" >> "$all_clients"
   done
@@ -2788,76 +2765,10 @@ ensure_self_signed_certificate() {
   local cert_file="$TMP_DIR/sing-box-cert.pem" key_file="$TMP_DIR/sing-box-key.pem"
 
   valid_self_signed_certificate && return
-
-  if [[ -f "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
-    && -f "$LEGACY_SING_BOX_TLS_HOME/key.pem" ]]; then
-    if openssl x509 -in "$LEGACY_SING_BOX_TLS_HOME/cert.pem" -noout -checkend 0 \
-      -checkhost "$SELF_SIGNED_TLS_SERVER_NAME" >/dev/null 2>&1 \
-      && validate_certificate_key_pair "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
-        "$LEGACY_SING_BOX_TLS_HOME/key.pem"; then
-      install_tls_certificate "$LEGACY_SING_BOX_TLS_HOME/cert.pem" \
-        "$LEGACY_SING_BOX_TLS_HOME/key.pem" "$SELF_SIGNED_TLS_CERT" \
-        "$SELF_SIGNED_TLS_KEY" || return 1
-      info "已迁移 sing-box 自签证书：$SELF_SIGNED_TLS_HOME"
-      return
-    fi
-  fi
   generate_self_signed_certificate "$cert_file" "$key_file" || return 1
   install_tls_certificate "$cert_file" "$key_file" "$SELF_SIGNED_TLS_CERT" \
     "$SELF_SIGNED_TLS_KEY" || return 1
   info "已生成 sing-box 自签名 TLS 证书"
-}
-
-migrate_legacy_tls_layout() {
-  local mode="self-signed" target_cert="$SELF_SIGNED_TLS_CERT"
-  local target_key="$SELF_SIGNED_TLS_KEY" config_file="$TMP_DIR/tls-migration.json"
-  local config_backup="$TMP_DIR/tls-migration.backup" domain source_cert source_key
-
-  [[ -s "$LEGACY_TLS_MODE_FILE" ]] && IFS= read -r mode < "$LEGACY_TLS_MODE_FILE"
-  if [[ "$mode" == "acme" ]]; then
-    target_cert="$ACME_TLS_CERT"
-    target_key="$ACME_TLS_KEY"
-  fi
-
-  if [[ -s "$LEGACY_TLS_CERT" && -s "$LEGACY_TLS_KEY" ]]; then
-    if [[ ! -s "$target_cert" || ! -s "$target_key" ]]; then
-      install -d -m 0700 "$(dirname "$target_cert")" || return 1
-      install -m 0644 "$LEGACY_TLS_CERT" "$target_cert" || return 1
-      install -m 0600 "$LEGACY_TLS_KEY" "$target_key" || return 1
-    fi
-    if [[ -x "$SING_BOX_HOME/sing-box" && -f "$SING_BOX_HOME/config.json" ]]; then
-      jq --arg old_cert "$LEGACY_TLS_CERT" --arg old_key "$LEGACY_TLS_KEY" \
-        --arg cert "$target_cert" --arg key "$target_key" '
-          .inbounds = ((.inbounds // []) | map(
-            if (.tls.certificate_path? == $old_cert) or (.tls.key_path? == $old_key)
-            then .tls.certificate_path = $cert | .tls.key_path = $key
-            else . end
-          ))
-        ' "$SING_BOX_HOME/config.json" > "$config_file" || return 1
-      "$SING_BOX_HOME/sing-box" check -c "$config_file" || return 1
-      install -m 0600 "$SING_BOX_HOME/config.json" "$config_backup" || return 1
-      install -m 0600 "$config_file" "$SING_BOX_HOME/config.json" || return 1
-      if [[ -f "/etc/systemd/system/${SING_BOX_SERVICE}.service" ]] \
-        && ! systemctl restart "$SING_BOX_SERVICE"; then
-        install -m 0600 "$config_backup" "$SING_BOX_HOME/config.json"
-        systemctl restart "$SING_BOX_SERVICE" || true
-        return 1
-      fi
-    fi
-    rm -f "$LEGACY_TLS_CERT" "$LEGACY_TLS_KEY"
-  fi
-  rm -f "$LEGACY_TLS_MODE_FILE"
-
-  if [[ ! -s "$ACME_TLS_CERT" && -s "$TLS_DOMAIN_FILE" ]]; then
-    IFS= read -r domain < "$TLS_DOMAIN_FILE"
-    source_cert="$ACME_DATA_HOME/certificates/${domain}.crt"
-    source_key="$ACME_DATA_HOME/certificates/${domain}.key"
-    if valid_domain "$domain" && [[ -s "$source_cert" && -s "$source_key" ]] \
-      && validate_certificate_pair "$domain" "$source_cert" "$source_key"; then
-      install_tls_certificate "$source_cert" "$source_key" "$ACME_TLS_CERT" \
-        "$ACME_TLS_KEY" || return 1
-    fi
-  fi
 }
 
 read_sing_box_node_details() {
@@ -3219,7 +3130,6 @@ prepare_rainbow() {
   init_temp_dir
 
   install_rainbow_command
-  migrate_legacy_tls_layout || die "迁移 TLS 证书失败"
   ensure_self_signed_certificate || die "初始化自签证书失败"
   rainbow_is_initialized || initialize_rainbow
   [[ -x "$ACME_BIN" ]] || install_lego || die "初始化 lego 失败"
