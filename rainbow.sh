@@ -102,7 +102,8 @@ require_root() {
 
 require_commands() {
   local command_name
-  for command_name in curl jq sha256sum systemctl install tar unzip openssl; do
+  [[ $# -gt 0 ]] || set -- curl jq sha256sum systemctl install tar unzip openssl
+  for command_name in "$@"; do
     command -v "$command_name" >/dev/null 2>&1 || die "缺少依赖：${command_name}"
   done
 }
@@ -3741,13 +3742,13 @@ run_command() {
       ;;
     acme-renew)
       require_root
-      require_commands
+      require_commands openssl sha256sum jq systemctl install
       init_temp_dir
       renew_acme_certificate
       ;;
     quick-tunnel-refresh)
       require_root
-      require_commands
+      require_commands jq install grep tail hostname
       refresh_quick_tunnel_client
       ;;
     *) main ;;
