@@ -18,11 +18,22 @@ bash <(curl -Ls https://raw.githubusercontent.com/linct96/rainbow/main/rainbow.s
 rb
 ```
 
-主菜单可设置节点名称前缀，默认使用服务器主机名。客户端节点名称格式为
-`{前缀名称}-{协议}`，例如 `vps01-XHTTP`；WARP 节点会额外追加
-`-WARP`。
+## sing-box CLI
 
-首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。WARP 注册会自动接受 [Cloudflare 服务条款](https://www.cloudflare.com/application/terms/)。
+```bash
+rb sing-box list
+rb sing-box add tuic
+rb sing-box add anytls --port 443
+rb sing-box add hysteria2 --address 1.2.3.4 --warp both
+rb sing-box remove tuic
+rb sing-box remove hysteria2 --yes
+```
+
+`--port` 省略时随机生成端口，`--address` 省略时自动检测公网 IPv4，
+`--warp` 支持 `direct`、`both` 和 `warp`，默认为 `direct`。删除节点需要输入
+`DELETE` 确认，自动化场景可使用 `--yes` 跳过确认。
+
+首次执行会自动安装最新版 Xray、sing-box、wgcf，注册 WARP 账户并生成自签 TLS 证书。
 
 通过 rainbow 安装的程序和配置位于：
 

@@ -2712,6 +2712,32 @@ read_sing_box_node_details() {
   read_node_address
 }
 
+resolve_sing_box_cli_node_details() {
+  local protocol="tcp"
+  [[ "$SING_NODE_TYPE" == "tuic" || "$SING_NODE_TYPE" == "hysteria2" ]] \
+    && protocol="udp"
+
+  if [[ -z "$NODE_PORT" ]]; then
+    NODE_PORT=$(random_high_port "$protocol") || {
+      printf '未找到可用的随机端口。\n' >&2
+      return 1
+    }
+    printf '已选择随机端口：%s\n' "$NODE_PORT"
+  else
+    if port_in_use "$NODE_PORT" "$protocol"; then
+      printf '端口 %s 已被占用。\n' "$NODE_PORT" >&2
+      return 1
+    fi
+  fi
+
+  if [[ -z "$NODE_ADDRESS" ]]; then
+    NODE_ADDRESS=$(detect_public_ipv4) || {
+      printf '无法检测公网 IPv4，请使用 --address 指定节点地址。\n' >&2
+      return 1
+    }
+  fi
+}
+
 write_sing_box_node_config() {
   local current_config=$1 config_file=$2 tag="rainbow-${SING_NODE_TYPE}"
   local direct_user="rainbow-${SING_NODE_TYPE}" warp_user="rainbow-${SING_NODE_TYPE}-warp"
@@ -2919,7 +2945,9 @@ setup_sing_box_node() {
     printf 'Hysteria2 需要 sing-box 1.5.0 或更高版本。\n' >&2
     return 1
   fi
-  select_warp_mode
+  if [[ "${CLI_MODE:-0}" != "1" ]]; then
+    select_warp_mode
+  fi
   if [[ "$WARP_MODE" != "direct" ]]; then
     if ! sing_box_supports_wireguard_endpoint; then
       printf 'WARP 需要 sing-box 1.11.0 或更高版本。\n' >&2
@@ -2940,7 +2968,11 @@ setup_sing_box_node() {
     }
   fi
 
-  read_sing_box_node_details || return
+  if [[ "${CLI_MODE:-0}" == "1" ]]; then
+    resolve_sing_box_cli_node_details || return
+  else
+    read_sing_box_node_details || return
+  fi
   ensure_self_signed_certificate || {
     printf '生成 sing-box TLS 证书失败。\n' >&2
     return 1
@@ -3033,6 +3065,175 @@ prepare_rainbow() {
   rainbow_is_initialized || initialize_rainbow
 }
 
+show_sing_box_cli_help() {
+  cat <<'EOF'
+用法：
+  rb sing-box list
+  rb sing-box add <tuic|anytls|hysteria2> [选项]
+  rb sing-box remove <tuic|anytls|hysteria2> [--yes]
+
+选项：
+  --port <端口>                  省略时随机生成
+  --address <IP或域名>          省略时自动检测公网 IPv4
+  --warp <direct|both|warp>      默认 direct
+  --yes                         删除时跳过确认
+  -h, --help                    显示帮助
+EOF
+}
+
+sing_box_cli_error() {
+  printf '%s\n' "$1" >&2
+  printf '请使用 rb sing-box --help 查看用法。\n' >&2
+  return 2
+}
+
+parse_sing_box_add_options() {
+  CLI_MODE=1
+  WARP_MODE="direct"
+  NODE_PORT=""
+  NODE_ADDRESS=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        [[ $# -ge 2 ]] || { sing_box_cli_error '缺少 --port 参数。'; return; }
+        NODE_PORT=$2
+        shift 2
+        ;;
+      --address)
+        [[ $# -ge 2 ]] || { sing_box_cli_error '缺少 --address 参数。'; return; }
+        NODE_ADDRESS=$2
+        shift 2
+        ;;
+      --warp)
+        [[ $# -ge 2 ]] || { sing_box_cli_error '缺少 --warp 参数。'; return; }
+        WARP_MODE=$2
+        shift 2
+        ;;
+      *)
+        sing_box_cli_error "未知参数：$1"
+        return
+        ;;
+    esac
+  done
+
+  if [[ -n "$NODE_PORT" ]]; then
+    [[ "$NODE_PORT" =~ ^[0-9]+$ && ${#NODE_PORT} -le 5 ]] \
+      || { sing_box_cli_error '端口必须是 1 到 65535 之间的整数。'; return; }
+    NODE_PORT=$((10#$NODE_PORT))
+    ((NODE_PORT >= 1 && NODE_PORT <= 65535)) \
+      || { sing_box_cli_error '端口必须是 1 到 65535 之间的整数。'; return; }
+  fi
+  [[ -z "$NODE_ADDRESS" \
+    || "$NODE_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+    || { sing_box_cli_error '节点地址格式错误。'; return; }
+  [[ "$WARP_MODE" =~ ^(direct|both|warp)$ ]] \
+    || { sing_box_cli_error '--warp 仅支持 direct、both 或 warp。'; return; }
+}
+
+run_sing_box_remove_command() {
+  local answer assume_yes=0 command_name label tag type=${1:-}
+  shift || true
+
+  if [[ "$type" == "-h" || "$type" == "--help" ]]; then
+    show_sing_box_cli_help
+    return
+  fi
+  [[ "$type" =~ ^(tuic|anytls|hysteria2)$ ]] \
+    || { sing_box_cli_error "不支持的 sing-box 节点类型：${type:-未指定}"; return; }
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes) assume_yes=1 ;;
+      *) sing_box_cli_error "未知参数：$1"; return ;;
+    esac
+    shift
+  done
+
+  require_root
+  for command_name in install jq systemctl; do
+    command -v "$command_name" >/dev/null 2>&1 || die "缺少依赖：${command_name}"
+  done
+  init_temp_dir
+  if [[ ! -f "$SING_BOX_HOME/config.json" ]]; then
+    printf '当前没有 %s 节点。\n' "$type"
+    return
+  fi
+  jq -e 'type == "object"' "$SING_BOX_HOME/config.json" >/dev/null || {
+    printf 'sing-box 配置格式错误，无法删除节点。\n' >&2
+    return 1
+  }
+  tag="rainbow-${type}"
+  if ! jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
+    "$SING_BOX_HOME/config.json" >/dev/null; then
+    printf '当前没有 %s 节点。\n' "$type"
+    return
+  fi
+  case "$type" in
+    tuic) label="TUIC" ;;
+    anytls) label="AnyTLS" ;;
+    hysteria2) label="Hysteria2" ;;
+  esac
+
+  if [[ "$assume_yes" != "1" ]]; then
+    printf '将删除 sing-box 节点：%s\n' "$label"
+    printf '同一协议的直出和 WARP 节点会一起删除。\n'
+    read -r -p '请输入 DELETE 确认删除：' answer || return 1
+    [[ "$answer" == "DELETE" ]] || {
+      printf '已取消删除。\n'
+      return 1
+    }
+  fi
+
+  REMOVE_NODE_ENGINES=("sing-box")
+  REMOVE_NODE_TYPES=("$type")
+  REMOVE_NODE_LABELS=("$label")
+  SELECTED_NODE_INDEXES=("1")
+  SELECTED_NODE_COUNT=1
+  remove_selected_nodes || return
+  log "已删除 sing-box ${label} 节点"
+}
+
+run_sing_box_command() {
+  local command=${1:-}
+
+  case "$command" in
+    list)
+      [[ $# -eq 1 ]] || { sing_box_cli_error 'list 不支持额外参数。'; return; }
+      require_root
+      command -v systemctl >/dev/null 2>&1 || die '缺少依赖：systemctl'
+      show_nodes "$SING_BOX_SERVICE" "$SING_BOX_HOME/client.txt" 'sing-box'
+      ;;
+    add)
+      shift
+      [[ $# -gt 0 ]] || { sing_box_cli_error '缺少 sing-box 节点类型。'; return; }
+      if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        show_sing_box_cli_help
+        return
+      fi
+      SING_NODE_TYPE=$1
+      shift
+      [[ "$SING_NODE_TYPE" =~ ^(tuic|anytls|hysteria2)$ ]] \
+        || { sing_box_cli_error "不支持的 sing-box 节点类型：$SING_NODE_TYPE"; return; }
+      parse_sing_box_add_options "$@" || return
+      prepare_rainbow
+      setup_sing_box_node
+      ;;
+    remove)
+      shift
+      run_sing_box_remove_command "$@"
+      ;;
+    -h | --help | help)
+      show_sing_box_cli_help
+      ;;
+    '')
+      sing_box_cli_error '缺少 sing-box 子命令。'
+      ;;
+    *)
+      sing_box_cli_error "未知 sing-box 子命令：$command"
+      ;;
+  esac
+}
+
 main() {
   prepare_rainbow
 
@@ -3086,6 +3287,10 @@ run_command() {
     --install)
       prepare_rainbow
       printf 'Rainbow 初始化安装完成，后续可直接运行 rb。\n'
+      ;;
+    sing-box)
+      shift
+      run_sing_box_command "$@"
       ;;
     acme-renew)
       require_root
