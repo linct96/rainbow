@@ -912,15 +912,25 @@ read_named_tunnel_node_details() {
 }
 
 select_warp_mode() {
-  local choice
+  local choice mode=${1:-final}
 
-  printf '%s\n' \
-    '' \
-    '请选择该节点的 WARP 出站模式：' \
-    '1) 仅启用直连节点（默认）' \
-    '2) 同时创建直出和 WARP 节点' \
-    '3) 仅创建 WARP 节点' \
-    ''
+  if [[ "$mode" == "target" ]]; then
+    printf '%s\n' \
+      '' \
+      '请选择要创建或替换的出站：' \
+      '1) 直出节点（保留已有 WARP，默认）' \
+      '2) 直出和 WARP 节点' \
+      '3) WARP 节点（保留已有直出）' \
+      ''
+  else
+    printf '%s\n' \
+      '' \
+      '请选择该节点的 WARP 出站模式：' \
+      '1) 仅启用直连节点（默认）' \
+      '2) 同时创建直出和 WARP 节点' \
+      '3) 仅创建 WARP 节点' \
+      ''
+  fi
   while true; do
     read -r -p '请输入 [1/2/3]（直接回车选择 1）：' choice
     case "${choice:-1}" in
@@ -1099,6 +1109,45 @@ ensure_warp_profile() {
   }
 }
 
+resolve_existing_xray_tunnel_type() {
+  [[ "$NODE_TYPE" == "ws-tunnel" && "$WARP_MODE" != "both" ]] || return
+  jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws-tunnel")' \
+    "$XRAY_HOME/config.json" >/dev/null && return
+  jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws-named-tunnel")' \
+    "$XRAY_HOME/config.json" >/dev/null && NODE_TYPE="ws-named-tunnel"
+  return 0
+}
+
+load_existing_xray_node_details() {
+  local client_file="$XRAY_HOME/client-${NODE_TYPE}.txt" tag="rainbow-vless-${NODE_TYPE}"
+
+  jq -e --arg tag "$tag" 'any(.inbounds[]?; .tag == $tag)' \
+    "$XRAY_HOME/config.json" >/dev/null || return 1
+  [[ -s "$client_file" ]] || {
+    printf '缺少现有节点客户端信息，无法保留另一条链接。\n' >&2
+    return 2
+  }
+
+  NODE_ADDRESS=$(awk '/^地址：/ {sub(/^地址：/, ""); print; exit}' "$client_file")
+  NODE_PORT=$(awk '/^端口：/ {sub(/^端口：/, ""); print; exit}' "$client_file")
+  NODE_SERVER_NAME=$(awk '/^(服务域名|伪装域名)：/ {sub(/^[^：]+：/, ""); print; exit}' \
+    "$client_file")
+  NODE_PATH=$(awk '/^(WebSocket|XHTTP) 路径：/ {sub(/^[^：]+：/, ""); print; exit}' \
+    "$client_file")
+  NODE_PRIVATE_KEY=""
+  NODE_PUBLIC_KEY=$(awk '/^Public Key：/ {sub(/^Public Key：/, ""); print; exit}' \
+    "$client_file")
+  NODE_SHORT_ID=$(awk '/^Short ID：/ {sub(/^Short ID：/, ""); print; exit}' "$client_file")
+  NODE_ENCRYPTION="none"
+  [[ ! -s "$XRAY_HOME/client-${NODE_TYPE}.enc" ]] \
+    || IFS= read -r NODE_ENCRYPTION < "$XRAY_HOME/client-${NODE_TYPE}.enc"
+  NODE_DECRYPTION=$(jq -r --arg tag "$tag" '
+    first(.inbounds[] | select(.tag == $tag) | .settings.decryption // "none")
+  ' "$XRAY_HOME/config.json")
+  [[ -n "$NODE_ADDRESS" && "$NODE_PORT" =~ ^[0-9]+$ && -n "$NODE_SERVER_NAME" ]] \
+    || return 2
+}
+
 generate_xray_credentials() {
   local encryption_output key_output
 
@@ -1106,6 +1155,10 @@ generate_xray_credentials() {
   NODE_WARP_UUID=""
   if [[ "$WARP_MODE" == "both" ]]; then
     NODE_WARP_UUID=$("$XRAY_HOME/xray" uuid)
+  fi
+  if [[ "${PRESERVE_XRAY_COUNTERPART:-0}" == "1" ]]; then
+    [[ "$NODE_UUID" =~ ^[0-9a-fA-F-]{36}$ ]]
+    return
   fi
   if [[ "$NODE_TYPE" == ws* ]]; then
     NODE_PRIVATE_KEY=""
@@ -1156,6 +1209,7 @@ write_xray_node_config() {
     --arg uuid "$NODE_UUID" \
     --arg warp_uuid "$NODE_WARP_UUID" \
     --arg warp_mode "$WARP_MODE" \
+    --arg preserve_other "${PRESERVE_XRAY_COUNTERPART:-0}" \
     --arg decryption "${NODE_DECRYPTION:-none}" \
     --arg flow "$flow" \
     --arg listen "$listen" \
@@ -1201,23 +1255,29 @@ write_xray_node_config() {
       def warp_client($id):
         {id: $id, flow: $flow, email: $warp_email};
 
-      def node_clients:
-        if $warp_mode == "direct" then
-          [direct_client]
-        elif $warp_mode == "both" then
-          [direct_client, warp_client($warp_uuid)]
-        else
-          [warp_client($uuid)]
+      def node_clients($existing):
+        if $preserve_other == "1" and $warp_mode == "direct" then
+          ($existing | map(select((.email // "") == $warp_email))) + [direct_client]
+        elif $preserve_other == "1" and $warp_mode == "warp" then
+          ($existing | map(select((.email // "") != $warp_email))) + [warp_client($uuid)]
+        elif $warp_mode == "direct" then [direct_client]
+        elif $warp_mode == "both" then [direct_client, warp_client($warp_uuid)]
+        else [warp_client($uuid)]
         end;
 
-      .inbounds = (
+      .inbounds = (if $preserve_other == "1" then
+        (.inbounds // [] | map(
+          if same_node_type then .settings.clients = node_clients(.settings.clients // [])
+          else . end
+        ))
+      else
         ((.inbounds // []) | map(select(same_node_type | not))) + [{
           tag: $tag,
           listen: $listen,
           port: $port,
           protocol: "vless",
           settings: {
-            clients: node_clients,
+            clients: node_clients([]),
             decryption: $decryption
           },
           streamSettings: (
@@ -1250,15 +1310,17 @@ write_xray_node_config() {
             destOverride: ["http", "tls", "quic"]
           }
         }]
-      )
+      end)
+      | ([.inbounds[]? | select(same_node_type) | .settings.clients[]?
+          | select((.email // "") == $warp_email)] | length > 0) as $uses_warp
       | .routing = (
           (.routing // {})
           | .rules = (
-              (if $warp_mode == "direct" then [] else [{
+              (if $uses_warp then [{
                   type: "field",
                   user: [$warp_email],
                   outboundTag: "rainbow-warp"
-                }] end)
+                }] else [] end)
               + ((.rules // []) | map(select(
                   (((.outboundTag // "") == "rainbow-warp")
                     and ((.user // []) | index($warp_email) != null)) | not
@@ -1290,6 +1352,33 @@ write_xray_node_config() {
           end
         )
     ' "$current_config" > "$config_file"
+}
+
+load_xray_output_credentials() {
+  local config_file=$1 direct_uuid tag="rainbow-vless-${NODE_TYPE}" warp_uuid
+
+  direct_uuid=$(jq -r --arg tag "$tag" --arg email "rainbow-${NODE_TYPE}-warp" '
+    first(.inbounds[] | select(.tag == $tag) | .settings.clients[]
+      | select((.email // "") != $email) | .id) // ""
+  ' "$config_file")
+  warp_uuid=$(jq -r --arg tag "$tag" --arg email "rainbow-${NODE_TYPE}-warp" '
+    first(.inbounds[] | select(.tag == $tag) | .settings.clients[]
+      | select((.email // "") == $email) | .id) // ""
+  ' "$config_file")
+
+  if [[ -n "$direct_uuid" && -n "$warp_uuid" ]]; then
+    WARP_MODE="both"
+    NODE_UUID=$direct_uuid
+    NODE_WARP_UUID=$warp_uuid
+  elif [[ -n "$warp_uuid" ]]; then
+    WARP_MODE="warp"
+    NODE_UUID=$warp_uuid
+    NODE_WARP_UUID=""
+  else
+    WARP_MODE="direct"
+    NODE_UUID=$direct_uuid
+    NODE_WARP_UUID=""
+  fi
 }
 
 write_xray_client_block() {
@@ -1635,12 +1724,24 @@ setup_xray_node() {
     return 1
   fi
 
+  PRESERVE_XRAY_COUNTERPART=0
   if [[ "${CLI_MODE:-0}" == "1" ]]; then
     VLESS_ENCRYPTION_ENABLED=0
     NODE_ENCRYPTION="none"
     NODE_DECRYPTION="none"
   else
-    select_warp_mode
+    select_warp_mode target
+  fi
+  resolve_existing_xray_tunnel_type
+  if [[ "$WARP_MODE" != "both" ]]; then
+    if load_existing_xray_node_details; then
+      PRESERVE_XRAY_COUNTERPART=1
+      info '将复用现有入口配置，只替换所选出站并保留另一出站'
+    elif [[ $? -eq 2 ]]; then
+      return 1
+    fi
+  fi
+  if [[ "$PRESERVE_XRAY_COUNTERPART" == "0" && "${CLI_MODE:-0}" != "1" ]]; then
     select_vless_encryption
   fi
   if [[ "$WARP_MODE" != "direct" ]]; then
@@ -1658,10 +1759,12 @@ setup_xray_node() {
       return 1
     }
   fi
-  if [[ "${CLI_MODE:-0}" == "1" ]]; then
-    resolve_xray_cli_node_details || return
-  else
-    read_node_details || return
+  if [[ "$PRESERVE_XRAY_COUNTERPART" == "0" ]]; then
+    if [[ "${CLI_MODE:-0}" == "1" ]]; then
+      resolve_xray_cli_node_details || return
+    else
+      read_node_details || return
+    fi
   fi
   generate_xray_credentials || {
     printf '生成 Xray 凭据失败。\n' >&2
@@ -1672,6 +1775,8 @@ setup_xray_node() {
     printf 'Xray 配置验证失败，原配置未修改。\n' >&2
     return 1
   }
+  [[ "$PRESERVE_XRAY_COUNTERPART" == "0" ]] \
+    || load_xray_output_credentials "$config_file"
 
   backup_file=$(mktemp "$XRAY_HOME/config.json.backup.XXXXXX")
   install -m 0600 "$XRAY_HOME/config.json" "$backup_file"
@@ -1699,6 +1804,10 @@ setup_xray_node() {
   fi
 
   info "原配置已备份：$backup_file"
+  if [[ "$PRESERVE_XRAY_COUNTERPART" == "1" ]]; then
+    save_xray_client_info
+    return
+  fi
   if [[ "$NODE_TYPE" == "ws-tunnel" ]]; then
     if ! setup_quick_tunnel_service; then
       install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
@@ -3178,7 +3287,7 @@ show_xray_cli_help() {
   --port <端口>                  省略时随机生成
   --domain <完整域名>           CDN 和固定 Tunnel 的 TLS SNI / WebSocket Host
   --address <IP或域名>          优选连接地址，省略时使用服务器域名
-  --warp <direct|both|warp>      默认 direct
+  --warp <direct|both|warp>      替换指定出站并保留另一出站；both 替换两者
   --sni <域名>                  REALITY 伪装域名，省略时按地区自动选择
   --path <路径>                 XHTTP、CDN 或 Tunnel 路径，省略时随机生成
   --token <Token>               Cloudflare Tunnel Token；省略时创建临时隧道
