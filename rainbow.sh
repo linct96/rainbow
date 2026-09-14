@@ -1110,7 +1110,7 @@ ensure_warp_profile() {
 }
 
 resolve_existing_xray_tunnel_type() {
-  [[ "$NODE_TYPE" == "ws-tunnel" && "$WARP_MODE" != "both" ]] || return
+  [[ "$NODE_TYPE" == "ws-tunnel" && "$WARP_MODE" != "both" ]] || return 0
   jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws-tunnel")' \
     "$XRAY_HOME/config.json" >/dev/null && return
   jq -e 'any(.inbounds[]?; .tag == "rainbow-vless-ws-named-tunnel")' \
