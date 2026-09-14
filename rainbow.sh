@@ -1793,6 +1793,8 @@ setup_xray_node() {
     }
   fi
   install -m 0600 "$config_file" "$XRAY_HOME/config.json"
+  # 重启节点可能切断当前 SSH；忽略挂断信号，确保客户端信息写入完成。
+  trap '' HUP
   if ! systemctl restart "$XRAY_SERVICE"; then
     install -m 0600 "$backup_file" "$XRAY_HOME/config.json"
     [[ -z "$encryption_file" ]] \
